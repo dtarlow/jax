@@ -13,18 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef JAXLIB_PASS_BOILERPLATE_H_
-#define JAXLIB_PASS_BOILERPLATE_H_
-
-#include <memory>
+#ifndef JAXLIB_MOSAIC_GPU_PASS_BOILERPLATE_H_
+#define JAXLIB_MOSAIC_GPU_PASS_BOILERPLATE_H_
 
 #include "mlir/include/mlir/IR/DialectRegistry.h"
 #include "mlir/include/mlir/Pass/Pass.h"
 #include "mlir/include/mlir/Support/LLVM.h"
 #include "mlir/include/mlir/Support/TypeID.h"
-
-namespace jaxlib {
-namespace mlir {
+namespace mosaic {
+namespace gpu {
 
 template <typename Derived, typename Op = void>
 class Pass : public ::mlir::OperationPass<Op> {
@@ -61,7 +58,7 @@ class Pass : public ::mlir::OperationPass<Op> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(This)
 };
 
-}  // namespace mlir
-}  // namespace jaxlib
+}  // namespace gpu
+}  // namespace mosaic
 
-#endif  // JAXLIB_PASS_BOILERPLATE_H_
+#endif  // JAXLIB_MOSAIC_GPU_PASS_BOILERPLATE_H_

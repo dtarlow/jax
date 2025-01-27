@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 from typing import Any
 
-import jax._src.core as jax_core
+from jax import core as jax_core
 from jax._src.interpreters import mlir
 from jax._src.lib.mlir import ir
 from jax._src.pallas import core as pallas_core
@@ -61,14 +61,14 @@ def pallas_call_lowering(
         "scalar prefetch not implemented in the Triton backend"
     )
   triton_params = compiler_params.get("triton", compiler_params)
-  num_warps = triton_params.get("num_warps", 4)
+  num_warps = triton_params.pop("num_warps", 4)
   num_warps = 4 if num_warps is None else num_warps
   [lowering_platform] = ctx.platforms or ctx.module_context.platforms
   if lowering_platform == "rocm":
-    num_stages = triton_params.get("num_stages", 1)
+    num_stages = triton_params.pop("num_stages", 1)
     num_stages = 1 if num_stages is None else num_stages
   else:
-    num_stages = triton_params.get("num_stages", 3)
+    num_stages = triton_params.pop("num_stages", 3)
     num_stages = 3 if num_stages is None else num_stages
 
   if debug:

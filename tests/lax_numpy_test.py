@@ -47,9 +47,11 @@ from jax.test_util import check_grads
 from jax._src import array
 from jax._src import config
 from jax._src import core
+from jax._src import deprecations
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax import lax as lax_internal
+from jax._src.lib import version as jaxlib_version
 from jax._src.util import safe_zip, NumpyComplexWarning, tuple_replace
 
 config.parse_flags_with_absl()
@@ -84,32 +86,6 @@ python_scalar_dtypes = [jnp.bool_, jnp.int_, jnp.float_, jnp.complex_]
 
 # uint64 is problematic because with any uint type it promotes to float:
 int_dtypes_no_uint64 = [d for d in int_dtypes + unsigned_dtypes if d != np.uint64]
-
-def _bitcast_uint4_to_uint8(operand):
-  # Note: assumes little-endian byte order.
-  assert operand.dtype == 'uint4'
-  operand = operand.astype('uint8')
-  return operand[..., ::2] + (operand[..., 1::2] << 4)
-
-def _bitcast_uint8_to_uint4(operand):
-  # Note: assumes little-endian byte order.
-  assert operand.dtype == 'uint8'
-  result = np.zeros((*operand.shape[:-1], operand.shape[-1] * 2), dtype='uint4')
-  result[..., ::2] = (operand & 0b00001111).astype('uint4')
-  result[..., 1::2] = ((operand & 0b11110000) >> 4).astype('uint4')
-  return result
-
-def np_view(arr, dtype):
-  # Implementation of np.ndarray.view() that works for int4/uint4
-  dtype = np.dtype(dtype)
-  nbits_in = dtypes.bit_width(arr.dtype)
-  nbits_out = dtypes.bit_width(dtype)
-  if nbits_in == 4:
-    arr = _bitcast_uint4_to_uint8(arr.view('uint4'))
-  if nbits_out == 4:
-    arr = _bitcast_uint8_to_uint4(arr.view('uint8'))
-  return arr.view(dtype)
-
 
 def np_unique_backport(ar, return_index=False, return_inverse=False, return_counts=False,
                        axis=None, **kwds):
@@ -674,57 +650,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_fn, args_maker, tol=tol)
 
   @jtu.sample_product(
-      lhs_batch=broadcast_compatible_shapes,
-      rhs_batch=broadcast_compatible_shapes,
-      mat_size=[1, 2, 3],
-      vec_size=[2, 3, 4],
-      dtype=number_dtypes,
-  )
-  @jax.default_matmul_precision("float32")
-  @jax.numpy_rank_promotion('allow')  # This test explicitly exercises implicit rank promotion.
-  def testMatvec(self, lhs_batch, rhs_batch, mat_size, vec_size, dtype):
-    rng = jtu.rand_default(self.rng())
-    lhs_shape = (*lhs_batch, mat_size, vec_size)
-    rhs_shape = (*rhs_batch, vec_size)
-    args_maker = lambda: [rng(lhs_shape, dtype), rng(rhs_shape, dtype)]
-    jnp_fn = jnp.matvec
-    @jtu.promote_like_jnp
-    def np_fn(x, y):
-      f = (np.vectorize(np.matmul, signature="(m,n),(n)->(m)")
-           if jtu.numpy_version() < (2, 2, 0) else np.matvec)
-      return f(x, y).astype(x.dtype)
-    tol = {np.float16: 1e-2, np.float32: 1E-3, np.float64: 1e-12,
-           np.complex64: 1E-3, np.complex128: 1e-12, jnp.bfloat16: 1e-1}
-    self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=tol)
-    self._CompileAndCheck(jnp_fn, args_maker, tol=tol)
-
-  @jtu.sample_product(
-      lhs_batch=broadcast_compatible_shapes,
-      rhs_batch=broadcast_compatible_shapes,
-      mat_size=[1, 2, 3],
-      vec_size=[2, 3, 4],
-      dtype=number_dtypes,
-  )
-  @jax.default_matmul_precision("float32")
-  @jax.numpy_rank_promotion('allow')  # This test explicitly exercises implicit rank promotion.
-  def testVecmat(self, lhs_batch, rhs_batch, mat_size, vec_size, dtype):
-    rng = jtu.rand_default(self.rng())
-    lhs_shape = (*lhs_batch, vec_size)
-    rhs_shape = (*rhs_batch, vec_size, mat_size)
-    args_maker = lambda: [rng(lhs_shape, dtype), rng(rhs_shape, dtype)]
-    jnp_fn = jnp.vecmat
-    @jtu.promote_like_jnp
-    def np_fn(x, y):
-      f = (np.vectorize(lambda x, y: np.matmul(np.conj(x), y),
-                        signature="(m),(m,n)->(n)")
-           if jtu.numpy_version() < (2, 2, 0) else np.vecmat)
-      return f(x, y).astype(x.dtype)
-    tol = {np.float16: 1e-2, np.float32: 1E-3, np.float64: 1e-12,
-           np.complex64: 1E-3, np.complex128: 1e-12, jnp.bfloat16: 1e-1}
-    self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=tol)
-    self._CompileAndCheck(jnp_fn, args_maker, tol=tol)
-
-  @jtu.sample_product(
     [dict(lhs_shape=lhs_shape, rhs_shape=rhs_shape, axes=axes)
       for lhs_shape, rhs_shape, axes in [
           [(3,), (), 0],
@@ -1059,8 +984,13 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         jnp.clip(x, max=jnp.array([-1+5j]))
 
   def testClipDeprecatedArgs(self):
-    with self.assertDeprecationWarnsOrRaises("jax-numpy-clip-args",
-                                             "Passing arguments 'a', 'a_min' or 'a_max' to jax.numpy.clip is deprecated"):
+    msg = "Passing arguments 'a', 'a_min' or 'a_max' to jax.numpy.clip is deprecated"
+    def assert_warns_or_errors(msg=msg):
+      if deprecations.is_accelerated("jax-numpy-clip-args"):
+        return self.assertRaisesRegex(ValueError, msg)
+      else:
+        return self.assertWarnsRegex(DeprecationWarning, msg)
+    with assert_warns_or_errors(msg):
       jnp.clip(jnp.arange(4), a_min=2, a_max=3)
 
   def testHypotComplexInputError(self):
@@ -1565,6 +1495,8 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       self.skipTest(f"{dtype} gets promoted to {np.float16}, which is not supported.")
     elif rank == 2 and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("Nonsymmetric eigendecomposition is only implemented on the CPU and GPU backends.")
+    if rank == 2 and jaxlib_version <= (0, 4, 35) and jtu.test_device_matches(["gpu"]):
+      self.skipTest("eig on GPU requires jaxlib version > 0.4.35")
     rng = jtu.rand_default(self.rng())
     tol = { np.int8: 2e-3, np.int32: 1e-3, np.float32: 1e-3, np.float64: 1e-6 }
     if jtu.test_device_matches(["tpu"]):
@@ -3496,8 +3428,13 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_fun, args_maker)
 
   def testReshapeDeprecatedArgs(self):
-    msg = "The newshape argument to jnp.reshape was removed in JAX v0.4.36."
-    with self.assertRaisesRegex(TypeError, msg):
+    msg = "The newshape argument of jax.numpy.reshape is deprecated."
+    def assert_warns_or_errors(msg=msg):
+      if deprecations.is_accelerated("jax-numpy-reshape-newshape"):
+        return self.assertRaisesRegex(ValueError, msg)
+      else:
+        return self.assertWarnsRegex(DeprecationWarning, msg)
+    with assert_warns_or_errors(msg):
       jnp.reshape(jnp.arange(4), newshape=(2, 2))
 
   @jtu.sample_product(
@@ -4177,8 +4114,13 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
   def testAstypeComplexDowncast(self):
     x = jnp.array(2.0+1.5j, dtype='complex64')
-    with self.assertDeprecationWarnsOrRaises("jax-numpy-astype-complex-to-real",
-                                             "Casting from complex to real dtypes.*"):
+    msg = "Casting from complex to real dtypes.*"
+    def assert_warns_or_errors(msg=msg):
+      if deprecations.is_accelerated("jax-numpy-astype-complex-to-real"):
+        return self.assertRaisesRegex(ValueError, msg)
+      else:
+        return self.assertWarnsRegex(DeprecationWarning, msg)
+    with assert_warns_or_errors():
       x.astype('float32')
 
   @parameterized.parameters('int2', 'int4')
@@ -4256,10 +4198,9 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
   @jtu.sample_product(
     # Final dimension must be a multiple of 16 to ensure compatibility of all dtype pairs.
-    shape=[(0,), (64,), (2, 32)],
-    a_dtype=(jnp.int4, jnp.uint4, *all_dtypes),
-    dtype=((jnp.int4, jnp.uint4, *all_dtypes, None)
-           if config.enable_x64.value else (jnp.int4, jnp.uint4, *all_dtypes)),
+    shape=[(0,), (32,), (2, 16)],
+    a_dtype=all_dtypes,
+    dtype=(*all_dtypes, None) if config.enable_x64.value else all_dtypes,
   )
   def testView(self, shape, a_dtype, dtype):
     if jtu.test_device_matches(["tpu"]):
@@ -4272,7 +4213,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         self.rng()
     )
     args_maker = lambda: [rng(shape, a_dtype)]
-    np_op = lambda x: np_view(x, dtype)
+    np_op = lambda x: np.asarray(x).view(dtype)
     jnp_op = lambda x: jnp.asarray(x).view(dtype)
     # Above may produce signaling nans; ignore warnings from invalid values.
     with np.errstate(invalid='ignore'):
@@ -4281,9 +4222,9 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
   @jtu.sample_product([
     {'a_dtype': a_dtype, 'dtype': dtype}
-    for a_dtype in [jnp.int4, jnp.uint4, *all_dtypes]
-    for dtype in [jnp.int4, jnp.uint4, *all_dtypes]
-    if dtypes.bit_width(a_dtype) == dtypes.bit_width(dtype)
+    for a_dtype in all_dtypes
+    for dtype in all_dtypes
+    if np.dtype(a_dtype).itemsize == np.dtype(dtype).itemsize
   ])
   def testViewScalar(self, a_dtype, dtype):
     if jtu.test_device_matches(["tpu"]):
@@ -5567,12 +5508,8 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       jnp.ones(2) + 3  # don't want to raise for scalars
 
     with jax.numpy_rank_promotion('warn'):
-      with self.assertWarnsRegex(
-        UserWarning,
-        "Following NumPy automatic rank promotion for add on shapes "
-        r"\(2,\) \(1, 2\).*"
-      ):
-        jnp.ones(2) + jnp.ones((1, 2))
+      self.assertWarnsRegex(UserWarning, "Following NumPy automatic rank promotion for add on "
+                            r"shapes \(2,\) \(1, 2\).*", lambda: jnp.ones(2) + jnp.ones((1, 2)))
       jnp.ones(2) + 3  # don't want to warn for scalars
 
   @unittest.skip("Test fails on CI, perhaps due to JIT caching")
@@ -6509,8 +6446,7 @@ class NumpySignaturesTest(jtu.JaxTestCase):
 _available_numpy_dtypes: list[str] = [dtype.__name__ for dtype in jtu.dtypes.all
                                       if dtype != dtypes.bfloat16]
 
-# TODO(jakevdp): implement missing ufuncs.
-UNIMPLEMENTED_UFUNCS = {'spacing', 'matvec', 'vecmat'}
+UNIMPLEMENTED_UFUNCS = {'spacing'}
 
 
 def _all_numpy_ufuncs() -> Iterator[str]:

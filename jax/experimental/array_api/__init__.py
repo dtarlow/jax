@@ -15,11 +15,18 @@
 # Note: import <name> as <name> is required for names to be exported.
 # See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
-from jax._src.ffi import (
-    ffi_call as ffi_call,
-    ffi_lowering as ffi_lowering,
-    include_dir as include_dir,
-    pycapsule as pycapsule,
-    register_ffi_target as register_ffi_target,
-    register_ffi_type_id as register_ffi_type_id,
+import sys as _sys
+import warnings as _warnings
+
+import jax.numpy as _array_api
+
+# Added 2024-08-01
+_warnings.warn(
+    "jax.experimental.array_api import is no longer required as of JAX v0.4.32; "
+    "jax.numpy supports the array API by default.",
+    DeprecationWarning, stacklevel=2
 )
+
+_sys.modules['jax.experimental.array_api'] = _array_api
+
+del _array_api, _sys, _warnings

@@ -297,8 +297,6 @@ class SparseTracer(core.Tracer):
 
 class SparseTrace(core.Trace):
 
-  __slots__ = ("parent_trace", "tag", "spenv")
-
   def __init__(self, parent_trace, tag, spenv):
     self.parent_trace = parent_trace
     self.tag = tag
@@ -739,7 +737,7 @@ def _sparsify_jaxpr(spenv, jaxpr, *spvalues):
 
   args = spvalues_to_arrays(spenv, spvalues)
   args_flat, in_tree = tree_flatten(args)
-  avals_flat = [core.get_aval(arg) for arg in args_flat]
+  avals_flat = [core.raise_to_shaped(core.get_aval(arg)) for arg in args_flat]
   sp_jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped, avals_flat)
   sp_jaxpr = pe.ClosedJaxpr(sp_jaxpr, consts)
   assert out_tree is not None
@@ -845,9 +843,8 @@ sparse_rules_bcoo[lax.scan_p] = _scan_sparse
 def _cond_sparse(spenv, pred, *operands, branches, **params):
   sp_branches, treedefs = zip(*(_sparsify_jaxpr(spenv, jaxpr, *operands)
                                 for jaxpr in branches))
-  _check_tree_and_avals("sparsified true_fun output",
+  _check_tree_and_avals("sparsified true_fun and false_fun output",
                         treedefs[0], sp_branches[0].out_avals,
-                        "sparsified false_fun output",
                         treedefs[1], sp_branches[1].out_avals)
   args, _ = tree_flatten(spvalues_to_arrays(spenv, (pred, *operands)))
   out_flat = lax.cond_p.bind(*args, branches=sp_branches, **params)

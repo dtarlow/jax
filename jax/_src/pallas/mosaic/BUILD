@@ -124,7 +124,6 @@ py_library(
         "//jax:pallas",
         "//jax:util",
         "//jax/_src/pallas",
-        "//jax/extend:backend",
     ] + py_deps("numpy"),
 )
 
@@ -136,15 +135,4 @@ py_library(
         "//jax",
         "//jax:typing",
     ] + py_deps("numpy"),
-)
-
-py_library(
-    name = "helpers",
-    srcs = ["helpers.py"],
-    deps = [
-        ":core",
-        ":primitives",
-        "//jax",
-        "//jax/_src/pallas",
-    ],
 )

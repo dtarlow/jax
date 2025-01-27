@@ -74,8 +74,6 @@ class System(object):
         env = dict(os.environ)
         if self.pkgbin == "apt":
             env["DEBIAN_FRONTEND"] = "noninteractive"
-            # Update indexes.
-            subprocess.check_call(["apt-get", "update"])
 
         LOG.info("Running %r" % cmd)
         subprocess.check_call(cmd, env=env)
@@ -231,7 +229,7 @@ def _build_installer_url(rocm_version, metadata):
 
     rv = parse_version(rocm_version)
 
-    base_url = "https://artifactory-cdn.amd.com/artifactory/list"
+    base_url = "http://artifactory-cdn.amd.com/artifactory/list"
 
     if md["ID"] == "ubuntu":
         fmt = "amdgpu-install-internal_%(rocm_major)s.%(rocm_minor)s-%(os_version)s-1_all.deb"

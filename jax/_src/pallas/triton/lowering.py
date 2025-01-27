@@ -102,7 +102,7 @@ class LoweringRuleContext:
 
 @dataclasses.dataclass
 class LoweringResult:
-  """Keeps python objects alive."""
+  """Keeps pybind11 objects alive."""
 
   module: ir.Module
   grid: tuple[int, ...]
@@ -273,7 +273,7 @@ def _check_tensor_size(shape: tuple[int | pallas_core.Mapped, ...]):
 def lower_jaxpr_to_triton_module(
     jaxpr: jax_core.Jaxpr,
     grid_mapping: GridMapping,
-    name_and_src_info: pallas_core.NameAndSrcInfo,
+    name_and_src_info: pallas_core.NameAndStrInfo,
     platform: str
 ) -> LoweringResult:
   if grid_mapping.num_dynamic_grid_bounds:
@@ -1469,22 +1469,10 @@ def _float_int_cast(
   dst_element_type = ir.IntegerType(_element_type(dst_type))
   if dst_element_type.width == 1:
     return _not_equal(src, _full(src.type, 0), signed=signed)
+  elif signed:
+    return arith_dialect.fptosi(dst_type, src)
   else:
-    # We clamp the float value to the min/max integer destination value
-    # in order to match JAX/XLA casting behavior. Note that this differs
-    # from numpy casting behavior.
-    if signed:
-      maxint = 2**(dst_element_type.width-1) - 1
-      minint = -2**(dst_element_type.width-1)
-    else:
-      maxint = 2**dst_element_type.width - 1
-      minint = 0
-    src = arith_dialect.minimumf(src, _full(src.type, maxint))
-    src = arith_dialect.maximumf(src, _full(src.type, minint))
-    if signed:
-      return arith_dialect.fptosi(dst_type, src)
-    else:
-      return arith_dialect.fptoui(dst_type, src)
+    return arith_dialect.fptoui(dst_type, src)
 
 
 def _int_float_cast(
@@ -1511,12 +1499,10 @@ def _cast(
       src,
       _dtype_to_ir_type(dst_type),
       signed=jnp.issubdtype(src_type, jnp.signedinteger),
-      dst_signed=jnp.issubdtype(dst_type, jnp.signedinteger),
   )
 
 
-def _ir_cast(src: ir.Value, dst_type: ir.Type, *,
-             signed: bool, dst_signed: bool = False) -> ir.Value:
+def _ir_cast(src: ir.Value, dst_type: ir.Type, *, signed: bool) -> ir.Value:
   if ir.RankedTensorType.isinstance(
       src.type
   ) and not ir.RankedTensorType.isinstance(dst_type):
@@ -1541,8 +1527,7 @@ def _ir_cast(src: ir.Value, dst_type: ir.Type, *,
       dst_element_type, ir.F32Type
   ):
     return _ir_cast(
-        _ir_cast(src, ir.F32Type.get(), signed=False),
-        dst_type, signed=False, dst_signed=dst_signed
+        _ir_cast(src, ir.F32Type.get(), signed=False), dst_type, signed=False
     )
 
   if isinstance(src_element_type, ir.FloatType) and isinstance(
@@ -1558,7 +1543,7 @@ def _ir_cast(src: ir.Value, dst_type: ir.Type, *,
   if isinstance(src_element_type, ir.FloatType) and isinstance(
       dst_element_type, ir.IntegerType
   ):
-    return _float_int_cast(src, dst_type, signed=dst_signed)
+    return _float_int_cast(src, dst_type, signed=signed)
   if isinstance(src_element_type, ir.IntegerType) and isinstance(
       dst_element_type, ir.FloatType
   ):
@@ -1622,7 +1607,7 @@ def _broadcast_in_dim_lowering_rule(
 @register_lowering(lax.squeeze_p)
 def _squeeze_lowering_rule(ctx: LoweringRuleContext, a, *, dimensions):
   del dimensions
-  return _reshape_lowering_rule(ctx, a, new_sizes=None, dimensions=None, sharding=None)
+  return _reshape_lowering_rule(ctx, a, new_sizes=None, dimensions=None)
 
 
 @register_lowering(lax.reshape_p)
@@ -1652,8 +1637,8 @@ def _reshape_lowering_rule(
   )
 
 
-def _compute_offsets_from_indices(
-    block_info: BlockInfo, nd_indexer: NDIndexer
+def _compute_pointers_from_indices(
+    root_ptr: ir.Value, block_info: BlockInfo, nd_indexer: NDIndexer
 ) -> ir.Value:
   full_shape = block_info.full_shape_dtype.shape
   num_mapped_dims = sum(b is pallas_core.mapped for b in block_info.block_shape)
@@ -1732,14 +1717,7 @@ def _compute_offsets_from_indices(
     dim_offsets = _mul(dim_offsets, _full(dim_offsets.type, dim_stride))
     offsets = _add(offsets, dim_offsets)
 
-  return offsets
-
-
-def _compute_pointers_from_indices(
-    root_ptr: ir.Value, block_info: BlockInfo, nd_indexer: NDIndexer
-) -> ir.Value:
-  offsets = _compute_offsets_from_indices(block_info, nd_indexer)
-  return _add(_bcast_to(root_ptr, nd_indexer.get_indexer_shape()), offsets)
+  return _add(_bcast_to(root_ptr, indexer_shape), offsets)
 
 
 @register_lowering(sp.get_p)
@@ -1855,20 +1833,14 @@ def _masked_load_lowering_rule(
   if not tt_dialect.PointerType.isinstance(ptr.type):
     assert len(ctx.avals_in) == 1
     return ptr
-
-  offsets = _compute_offsets_from_indices(block_info, idx)
-  ptr_offsets = offsets
-
-  if block_info.full_shape_dtype.dtype in (jnp.int4, jnp.uint4):
-    ptr_offsets = _floordiv(offsets, _full(offsets.type, 2), signed=False)
-
-  shape = idx.get_indexer_shape()
-  ptr = _add(_bcast_to(ptr, shape), ptr_offsets)
+  ptr = _compute_pointers_from_indices(ptr, block_info, idx)
   if mask is not None:
-    mask = _bcast_to(_ensure_ir_value(mask, mask_aval), shape)
+    mask = _bcast_to(_ensure_ir_value(mask, mask_aval), idx.get_indexer_shape())
   if other is not None:
-    other = _bcast_to(_ensure_ir_value(other, other_aval), shape)
-  values = _load(
+    other = _bcast_to(
+        _ensure_ir_value(other, other_aval), idx.get_indexer_shape()
+    )
+  return _load(
       ptr,
       mask=mask,
       other=other,
@@ -1876,19 +1848,6 @@ def _masked_load_lowering_rule(
       is_volatile=is_volatile,
       eviction_policy=eviction_policy,
   )
-
-  if block_info.full_shape_dtype.dtype not in (jnp.int4, jnp.uint4):
-    return values
-
-  # XLA packs pairs of `[u]int4` values into a `uint8` value with the first
-  # in the most significant bits and the second in the least significant.
-  offsets = _ir_cast(offsets, ir.IntegerType.get_signless(32), signed=False)
-  in_lsb = _mod(offsets, _full(offsets.type, 2), signed=False)
-  in_msb = arith_dialect.xori(in_lsb, _full(in_lsb.type, 1))
-  shift = _mul(in_msb, _full(in_msb.type, 4))
-  shift = _ir_cast(shift, values.type, signed=False)
-  values = arith_dialect.shrui(values, shift)
-  return _ir_cast(values, ir.IntegerType.get_signless(4), signed=False)
 
 
 @register_lowering(sp.swap_p)
@@ -2009,6 +1968,81 @@ def _transpose_lowering(ctx: LoweringRuleContext, x, *, permutation):
   return tt_dialect.trans(x, permutation)
 
 
+def _check_dot_operands(
+    x_type: ir.RankedTensorType, y_type: ir.RankedTensorType, options: Any
+):
+  # TODO(slebedev): Ensure that the dtypes are supported by CUDA.
+  return
+
+
+def _dot(
+    x: ir.Value,
+    y: ir.Value,
+    acc: ir.Value | None = None,
+    *,
+    allow_tf32: bool = True,
+    max_num_imprecise_acc: int | None = None,
+    out_type: ir.Type | None = None,
+) -> ir.Value:
+  if out_type is None:
+    out_type = ir.F32Type.get()
+  elif isinstance(out_type, ir.BF16Type):
+    raise NotImplementedError(f"unsupported output type: {out_type}")
+
+  x_type = ir.RankedTensorType(x.type)
+  y_type = ir.RankedTensorType(y.type)
+  if min(*x_type.shape, *y_type.shape) < 16:
+    raise ValueError("all dimensions of x and y must be >= 16 ")
+  if x_type.element_type != y_type.element_type:
+    raise ValueError(
+        "x and y must have the same element type, but got:"
+        f" {x_type.element_type} and {y_type.element_type}"
+    )
+
+  _check_dot_operands(x_type, y_type, object())
+
+  element_type = x_type.element_type
+  if isinstance(element_type, ir.IntegerType):
+    if element_type.width != 8:
+      raise TypeError(f"unsupported element type: {element_type}")
+    element_type = ir.IntegerType.get_signless(32)
+  elif isinstance(element_type, (ir.F32Type, ir.BF16Type)):
+    element_type = ir.F32Type.get()
+  else:
+    element_type = out_type
+
+  if element_type != out_type:
+    raise TypeError(
+        f"output type {out_type} does not match element type {element_type}"
+    )
+
+  m, _ = x_type.shape
+  _, n = y_type.shape
+
+  if acc is None:
+    acc = _full(ir.RankedTensorType.get([m, n], element_type), 0)
+
+  if max_num_imprecise_acc is None:
+    if isinstance(element_type, ir.FloatType) and element_type.width == 8:
+      # TODO(slebedev): Fill in from options.
+      raise NotImplementedError
+    else:
+      max_num_imprecise_acc = 0
+
+  # Ideally, replace all allow_tf32 usages with InputPrecision directly.
+  input_precision = tt_dialect.InputPrecision.IEEE
+  if allow_tf32:
+    input_precision = tt_dialect.InputPrecision.TF32
+
+  return tt_dialect.dot(
+      x,
+      y,
+      acc,
+      max_num_imprecise_acc=max_num_imprecise_acc,
+      input_precision=input_precision
+  )
+
+
 _TF32_PRECISIONS = (lax.Precision.HIGH, lax.Precision.DEFAULT)
 
 
@@ -2019,11 +2053,11 @@ def _dot_general_lowering(
     b,
     *,
     dimension_numbers,
-    out_sharding,
+    out_type,
     precision,
     preferred_element_type,
 ):
-  del preferred_element_type, out_sharding  # Unused.
+  del preferred_element_type, out_type  # Unused.
   ((a_contract_dim,), (b_contract_dim,)), batch_dims = dimension_numbers
   assert batch_dims == ((), ())
 
@@ -2032,63 +2066,27 @@ def _dot_general_lowering(
   if b_contract_dim == 1:
     b = tt_dialect.trans(b, (1, 0))
 
-  a_aval, b_aval = ctx.avals_in
-  [out_aval] = ctx.avals_out
-
-  if precision is None or (precision == lax.DotAlgorithmPreset.DEFAULT):
-    precision = (lax.Precision.DEFAULT, lax.Precision.DEFAULT)
-
-  if isinstance(precision, lax.DotAlgorithmPreset):
-    match precision:
-      case lax.DotAlgorithmPreset.TF32_TF32_F32:
-        input_precision = tt_dialect.InputPrecision.TF32
-      case lax.DotAlgorithmPreset.TF32_TF32_F32_X3:
-        input_precision = tt_dialect.InputPrecision.TF32x3
-      case lax.DotAlgorithmPreset.F32_F32_F32:
-        input_precision = tt_dialect.InputPrecision.IEEE
-      case (
-          lax.DotAlgorithmPreset.F16_F16_F16
-          | lax.DotAlgorithmPreset.F16_F16_F32
-          | lax.DotAlgorithmPreset.BF16_BF16_BF16
-          | lax.DotAlgorithmPreset.BF16_BF16_F32
-      ):
-        input_precision = None
-      case _:
-        raise NotImplementedError(f"Unsupported dot algorithm: {precision}.")
-
-    a = _cast(a, a_aval.dtype, precision.supported_lhs_types[0])
-    b = _cast(b, b_aval.dtype, precision.supported_rhs_types[0])
-    acc_dtype = precision.accumulation_type
-  elif isinstance(precision, tuple):
-    a_precision, b_precision = precision
-    if a_precision in _TF32_PRECISIONS or b_precision in _TF32_PRECISIONS:
-      input_precision = tt_dialect.InputPrecision.TF32
-    elif a_aval.dtype == jnp.float32:
-      input_precision = tt_dialect.InputPrecision.IEEE
-    else:
-      input_precision = None
-
-    acc_dtype = out_aval.dtype
-    if acc_dtype != jnp.int32 and acc_dtype != jnp.float16:
-      acc_dtype = jnp.float32
+  if precision is None:
+    allow_tf32 = True
   else:
-    raise NotImplementedError(f"Unsupported dot precision: {precision}.")
+    prec_a, prec_b = precision
+    allow_tf32 = prec_a in _TF32_PRECISIONS or prec_b in _TF32_PRECISIONS
 
-  a_type = ir.RankedTensorType(a.type)
-  b_type = ir.RankedTensorType(b.type)
-  if min(*a_type.shape, *b_type.shape) < 16:
-    raise ValueError("all dimensions of a and b must be >= 16 ")
-  if a_type.element_type != b_type.element_type:
-    raise ValueError(
-        "a and b must have the same element type, but got:"
-        f" {a_type.element_type} and {b_type.element_type}"
-    )
+  [out_aval] = ctx.avals_out
+  out_dtype = acc_dtype = out_aval.dtype
+  if acc_dtype != jnp.int32 and acc_dtype != jnp.float16:
+    acc_dtype = jnp.dtype(jnp.float32)
 
-  m, _ = a_type.shape
-  _, n = b_type.shape
-  acc = _full(ir.RankedTensorType.get([m, n], _dtype_to_ir_type(acc_dtype)), 0)
-  acc = tt_dialect.dot(a, b, acc, input_precision=input_precision)
-  return _cast(acc, acc_dtype, out_aval.dtype)
+  return _cast(
+      _dot(
+          a,
+          b,
+          allow_tf32=allow_tf32,
+          out_type=_dtype_to_ir_type(acc_dtype),
+      ),
+      acc_dtype,
+      out_dtype,
+  )
 
 
 def _reduction_lowering(body, ctx: LoweringRuleContext, a, axes):
@@ -2478,7 +2476,6 @@ def _while_lowering_rule(
   args = map(_ensure_ir_value, args, ctx.avals_in)
 
   # First, try to pattern match to fori_loop and lower to scf.for if possible
-  # TODO(slebedev): Use `pallas_utils.pattern_match_while_to_fori_loop`.
   result = _maybe_pattern_match_fori_loop(ctx, *args, cond_nconsts=cond_nconsts,
                                           body_nconsts=body_nconsts, cond_jaxpr=cond_jaxpr,
                                           body_jaxpr=body_jaxpr)
@@ -2611,8 +2608,7 @@ def _i64_constant(v: int) -> ir.Value:
   return arith_dialect.constant(ir.IntegerType.get_signless(64), v)
 
 
-def _dtype_to_ir_type(dtype: jax.typing.DTypeLike) -> ir.Type:
-  dtype = jnp.dtype(dtype)
+def _dtype_to_ir_type(dtype: jnp.dtype) -> ir.Type:
   if jnp.issubdtype(dtype, np.integer):
     # All integer types in Triton are signless.
     return ir.IntegerType.get_signless(dtype.itemsize * 8)

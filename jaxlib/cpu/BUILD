@@ -16,7 +16,7 @@
 
 load(
     "//jaxlib:jax.bzl",
-    "nanobind_extension",
+    "pybind_extension",
 )
 
 licenses(["notice"])
@@ -53,7 +53,7 @@ cc_library(
     alwayslink = 1,
 )
 
-nanobind_extension(
+pybind_extension(
     name = "_lapack",
     srcs = ["lapack.cc"],
     copts = [
@@ -72,7 +72,6 @@ nanobind_extension(
     deps = [
         ":lapack_kernels",
         "//jaxlib:kernel_nanobind_helpers",
-        "@com_google_absl//absl/base",
         "@nanobind",
         "@xla//xla/ffi/api:ffi",
     ],

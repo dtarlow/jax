@@ -1487,7 +1487,6 @@ class DynamicShapeExecutionTest(jtu.JaxTestCase):
 class JumbleTest(jtu.JaxTestCase):
 
   def setUp(self):
-    super().setUp()
     if jax.config.x64_enabled: raise unittest.SkipTest()
 
   @parameterized.parameters((True,), (False,))

@@ -19,41 +19,30 @@ from jax._src.lib import mosaic_gpu_dialect as dialect  # noqa: F401
 from .core import (
     Barrier as Barrier,
     ClusterBarrier as ClusterBarrier,
+    LaunchContext as LaunchContext,
+    MemRefTransform as MemRefTransform,
     TMABarrier as TMABarrier,
-    ThreadSemantics as ThreadSemantics,
+    TileTransform as TileTransform,
+    TransposeTransform as TransposeTransform,
     Union as Union,
     as_gpu_kernel as as_gpu_kernel,
 )
 
-from .launch_context import (
-    LaunchContext as LaunchContext,
-    MemRefTransform as MemRefTransform,
-    TileTransform as TileTransform,
-    TransposeTransform as TransposeTransform,
-)
-
 if dialect is not None:
   from .dialect_lowering import (
-      lower_mgpu_dialect as lower_mgpu_dialect,
-  )
-  from .layout_inference import (
-      infer_layout as infer_layout,
+      gpu_address_space_to_nvptx as gpu_address_space_to_nvptx,
+      lower_mgpu_dialect as lower_mgpu_dialect
   )
 else:
-  lower_mgpu_dialect = None
-  infer_layout = None
-
+  gpu_address_space_to_nvptx, lower_mgpu_dialect = None, None
 
 from .fragmented_array import (
     FragmentedArray as FragmentedArray,
     FragmentedLayout as FragmentedLayout,
     WGMMA_LAYOUT as WGMMA_LAYOUT,
     WGMMA_ROW_LAYOUT as WGMMA_ROW_LAYOUT,
-    WGMMAFragLayout as WGMMAFragLayout,
-    WGMMARowFragLayout as WGMMARowFragLayout,
     WGSplatFragLayout as WGSplatFragLayout,
     WGStridedFragLayout as WGStridedFragLayout,
-    optimization_barrier as optimization_barrier,
 )
 from .utils import (
     BarrierRef as BarrierRef,
@@ -61,7 +50,6 @@ from .utils import (
     DynamicSlice as DynamicSlice,
     Partition as Partition,
     Partition1D as Partition1D,
-    bitwidth as bitwidth,
     bytewidth as bytewidth,
     c as c,
     commit_shared as commit_shared,

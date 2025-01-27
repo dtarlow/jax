@@ -466,8 +466,7 @@ KernelCall::KernelCall(Kernel kernel, uint32_t grid_0, uint32_t grid_1,
 
 absl::Status KernelCall::Launch(gpuStream_t stream, void** buffers) {
   std::vector<void*> params;
-  // We need an additional parameter for the scratchpad buffer.
-  params.reserve(parameters_.size() + 1);
+  params.reserve(parameters_.size());
   for (size_t i = 0; i < parameters_.size(); ++i) {
     const Parameter& param = parameters_[i];
     if (std::holds_alternative<Parameter::Array>(param.value)) {
@@ -493,14 +492,6 @@ absl::Status KernelCall::Launch(gpuStream_t stream, void** buffers) {
           param.value)));
     }
   }
-  // Triton's kernel ABI expects an additional scratchpad global memory.
-  // For now it is only used for on-device creation of TMA descriptors, which
-  // we do not use yet, so we are just replacing this argument with a null
-  // pointer.
-  // TODO: b/381242007 - Allocate a proper buffer if we want to use
-  // device-side TMA APIs.
-  void* scratch_ptr = nullptr;  // Alive until kernel_.Launch returns.
-  params.push_back(&scratch_ptr);
 
   return kernel_.Launch(stream, grid_, params.data());
 }

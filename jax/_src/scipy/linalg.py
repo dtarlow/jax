@@ -820,39 +820,20 @@ def lu(a: ArrayLike, permute_l: bool = False, overwrite_a: bool = False,
   del overwrite_a, check_finite  # unused
   return _lu(a, permute_l)
 
+@overload
+def _qr(a: ArrayLike, mode: Literal["r"], pivoting: bool) -> tuple[Array]: ...
 
 @overload
-def _qr(a: ArrayLike, mode: Literal["r"], pivoting: Literal[False]
-       ) -> tuple[Array]: ...
+def _qr(a: ArrayLike, mode: Literal["full", "economic"], pivoting: bool) -> tuple[Array, Array]: ...
 
 @overload
-def _qr(a: ArrayLike, mode: Literal["r"], pivoting: Literal[True]
-       ) -> tuple[Array, Array]: ...
-
-@overload
-def _qr(a: ArrayLike, mode: Literal["full", "economic"], pivoting: Literal[False]
-       ) -> tuple[Array, Array]: ...
-
-@overload
-def _qr(a: ArrayLike, mode: Literal["full", "economic"], pivoting: Literal[True]
-       ) -> tuple[Array, Array, Array]: ...
-
-@overload
-def _qr(a: ArrayLike, mode: str, pivoting: Literal[False]
-       ) -> tuple[Array] | tuple[Array, Array]: ...
-
-@overload
-def _qr(a: ArrayLike, mode: str, pivoting: Literal[True]
-       ) -> tuple[Array, Array] | tuple[Array, Array, Array]: ...
-
-@overload
-def _qr(a: ArrayLike, mode: str, pivoting: bool
-       ) -> tuple[Array] | tuple[Array, Array] | tuple[Array, Array, Array]: ...
-
+def _qr(a: ArrayLike, mode: str, pivoting: bool) -> tuple[Array] | tuple[Array, Array]: ...
 
 @partial(jit, static_argnames=('mode', 'pivoting'))
-def _qr(a: ArrayLike, mode: str, pivoting: bool
-       ) -> tuple[Array] | tuple[Array, Array] | tuple[Array, Array, Array]:
+def _qr(a: ArrayLike, mode: str, pivoting: bool) -> tuple[Array] | tuple[Array, Array]:
+  if pivoting:
+    raise NotImplementedError(
+        "The pivoting=True case of qr is not implemented.")
   if mode in ("full", "r"):
     full_matrices = True
   elif mode == "economic":
@@ -860,56 +841,31 @@ def _qr(a: ArrayLike, mode: str, pivoting: bool
   else:
     raise ValueError(f"Unsupported QR decomposition mode '{mode}'")
   a, = promote_dtypes_inexact(jnp.asarray(a))
-  q, r, *p = lax_linalg.qr(a, pivoting=pivoting, full_matrices=full_matrices)
+  q, r = lax_linalg.qr(a, full_matrices=full_matrices)
   if mode == "r":
-    if pivoting:
-      return r, p[0]
     return (r,)
-  if pivoting:
-    return q, r, p[0]
   return q, r
 
 
 @overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["full", "economic"], pivoting: Literal[False] = False,
-       check_finite: bool = True) -> tuple[Array, Array]: ...
+def qr(a: ArrayLike, overwrite_a: bool = False, lwork: Any = None, mode: Literal["full", "economic"] = "full",
+       pivoting: bool = False, check_finite: bool = True) -> tuple[Array, Array]: ...
 
 @overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["full", "economic"], pivoting: Literal[True] = True,
-       check_finite: bool = True) -> tuple[Array, Array, Array]: ...
+def qr(a: ArrayLike,  overwrite_a: bool, lwork: Any, mode: Literal["r"],
+       pivoting: bool = False, check_finite: bool = True) -> tuple[Array]: ...
 
 @overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["full", "economic"], pivoting: bool = False,
-       check_finite: bool = True
-      ) -> tuple[Array, Array] | tuple[Array, Array, Array]: ...
-
-@overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["r"], pivoting: Literal[False] = False, check_finite: bool = True
-      ) -> tuple[Array]: ...
-
-@overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["r"], pivoting: Literal[True] = True, check_finite: bool = True
-      ) -> tuple[Array, Array]: ...
-
-@overload
-def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *,
-       mode: Literal["r"], pivoting: bool = False, check_finite: bool = True
-      ) -> tuple[Array] | tuple[Array, Array]: ...
+def qr(a: ArrayLike,  overwrite_a: bool = False, lwork: Any = None, *, mode: Literal["r"],
+       pivoting: bool = False, check_finite: bool = True) -> tuple[Array]: ...
 
 @overload
 def qr(a: ArrayLike, overwrite_a: bool = False, lwork: Any = None, mode: str = "full",
-       pivoting: bool = False, check_finite: bool = True
-      ) -> tuple[Array] | tuple[Array, Array] | tuple[Array, Array, Array]: ...
+       pivoting: bool = False, check_finite: bool = True) -> tuple[Array] | tuple[Array, Array]: ...
 
 
 def qr(a: ArrayLike, overwrite_a: bool = False, lwork: Any = None, mode: str = "full",
-       pivoting: bool = False, check_finite: bool = True
-      ) -> tuple[Array] | tuple[Array, Array] | tuple[Array, Array, Array]:
+       pivoting: bool = False, check_finite: bool = True) -> tuple[Array] | tuple[Array, Array]:
   """Compute the QR decomposition of an array
 
   JAX implementation of :func:`scipy.linalg.qr`.
@@ -932,28 +888,21 @@ def qr(a: ArrayLike, overwrite_a: bool = False, lwork: Any = None, mode: str = "
       - ``"economic"``: return `Q` of shape ``(M, K)`` and `R` of shape ``(K, N)``,
         where K = min(M, N).
 
-    pivoting: Allows the QR decomposition to be rank-revealing. If ``True``, compute
-      the column-pivoted decomposition ``A[:, P] = Q @ R``, where ``P`` is chosen such
-      that the diagonal of ``R`` is non-increasing.
+    pivoting: Not implemented in JAX.
     overwrite_a: unused in JAX
     lwork: unused in JAX
     check_finite: unused in JAX
 
   Returns:
-    A tuple ``(Q, R)`` or ``(Q, R, P)``, if ``mode`` is not ``"r"`` and ``pivoting`` is
-    respectively ``False`` or ``True``, otherwise an array ``R`` or tuple ``(R, P)`` if
-    mode is ``"r"``, and ``pivoting`` is respectively ``False`` or ``True``, where:
+    A tuple ``(Q, R)`` (if ``mode`` is not ``"r"``) otherwise an array ``R``,
+    where:
 
     - ``Q`` is an orthogonal matrix of shape ``(..., M, M)`` (if ``mode`` is ``"full"``)
-      or ``(..., M, K)`` (if ``mode`` is ``"economic"``),
+      or ``(..., M, K)`` (if ``mode`` is ``"economic"``).
     - ``R`` is an upper-triangular matrix of shape ``(..., M, N)`` (if ``mode`` is
-      ``"r"`` or ``"full"``) or ``(..., K, N)`` (if ``mode`` is ``"economic"``),
-    - ``P`` is an index vector of shape ``(..., N)``.
+      ``"r"`` or ``"full"``) or ``(..., K, N)`` (if ``mode`` is ``"economic"``)
 
     with ``K = min(M, N)``.
-
-  Notes:
-    - At present, pivoting is only implemented on CPU backends.
 
   See also:
     - :func:`jax.numpy.linalg.qr`: NumPy-style QR decomposition API
@@ -1730,7 +1679,7 @@ def polar(a: ArrayLike, side: str = 'right', *, method: str = 'qdwh', eps: float
 
     U is a Unitary Matrix:
 
-    >>> jnp.round(U.T @ U)  # doctest: +SKIP
+    >>> jnp.round(U.T @ U)
     Array([[ 1., -0., -0.],
            [-0.,  1.,  0.],
            [-0.,  0.,  1.]], dtype=float32)

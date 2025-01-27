@@ -112,6 +112,7 @@ def _pad_values_to_block_dimension(value,
   return value
 
 def _initialize_scratch_vals(scratch_avals) -> tuple[jax.Array, ...]:
+  scratch_avals = (jax_core.raise_to_shaped(x) for x in scratch_avals)
   return tuple(
       primitives.uninitialized_value(a.shape, a.dtype) for a in scratch_avals
   )
@@ -1117,15 +1118,10 @@ def _pallas_call_batching_rule(
     # assert ragged_axis_length is not None
     args = (ragged_axis_length, *args)
   assert all(isinstance(aval, jax_core.ShapedArray) for aval in out_avals)
-
-  batched_out_avals = []
-  for aval in out_avals:
-    sharding = (aval.sharding.with_spec(tuple_insert(aval.sharding.spec, 0, None))
-                if config.sharding_in_types.value else None)
-    shape = tuple_insert(aval.shape, 0, axis_size)
-    batched_out_avals.append(aval.update(shape=shape, sharding=sharding))
-  batched_out_avals = tuple(batched_out_avals)  # type: ignore
-
+  batched_out_avals = tuple(
+      aval.update(shape=tuple_insert(aval.shape, 0, axis_size))
+      for aval in out_avals
+  )
   out = pallas_call_p.bind(
       *dynamic_grid_args,
       *args,
@@ -1155,7 +1151,7 @@ def checkify_pallas_kernel_body_jaxpr(
     grid_mapping: GridMapping) -> tuple[
         jax_core.ClosedJaxpr, tree_util.PyTreeDef, set[checkify.ErrorEffect]]:
   err_vals, err_tree = tree_util.tree_flatten(error)
-  err_vals = map(jax_core.get_aval, err_vals)
+  err_vals = map(checkify.get_shaped_aval, err_vals)
   flat_err_and_in_vals = [*err_vals, *body_jaxpr.in_avals]
 
   with pallas_core.tracing_grid_env(grid_mapping.grid, ()):
@@ -1278,13 +1274,13 @@ def pallas_call_checkify_rule(error: checkify.Error,
       closed_jaxpr, enabled_errors, error, grid_mapping)
   error = error._add_placeholder_effects(error_effects)
   err_vals, err_in_tree = jax.tree.flatten(error)
-  shaped_err_avals = map(jax_core.get_aval, err_vals)
+  shaped_err_avals = map(checkify.get_shaped_aval, err_vals)
 
   # Trace the kernel jaxpr to get a checkified jaxpr. This jaxpr will have
   # all enabled errors removed, but have the error as inputs and return values.
   input_avals = [v.aval for v in jaxpr.invars]
   num_err_vals = len(err_vals)
-  shaped_input_avals = tuple(input_avals)
+  shaped_input_avals = tuple(jax_core.raise_to_shaped(x) for x in input_avals)
   checkify_in_avals = [*shaped_err_avals,
                        *shaped_input_avals]
   closed_kernel_jaxpr = pe.close_jaxpr(jaxpr)
@@ -1345,8 +1341,8 @@ def pallas_call_checkify_rule(error: checkify.Error,
   jaxpr_flat_avals, jaxpr_in_tree = tree_util.tree_flatten(retrace_in_avals)
   wrapped_kernel_with_err, out_tree_thunk = api_util.flatten_fun_nokwargs(
       lu.wrap_init(checked_kernel_fn), jaxpr_in_tree)
-  debug = api_util.tracing_debug_info("checkify_pallas", checked_kernel_fn,
-                                      retrace_in_avals, {})
+  debug = pe.debug_info(
+    checked_kernel_fn, jaxpr_in_tree, out_tree_thunk, False, "checkify_pallas")
   with pallas_core.tracing_grid_env(grid_mapping.grid, ()):
     final_jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
         wrapped_kernel_with_err, jaxpr_flat_avals, debug)
@@ -1415,13 +1411,13 @@ def _trace_kernel_to_jaxpr(
   wrapped_kernel_fun = primitives.wrap_with_transforms(
       wrapped_kernel_fun, kernel_in_transforms
   )
-  fake_kernel_args = kernel_in_tree.unflatten(kernel_avals)
-  debug = api_util.tracing_debug_info("pallas_call", fun, fake_kernel_args, {})
+  debug = pe.debug_info(fun, kernel_in_tree, out_tree_thunk, False, "pallas_call")
   with grid_mapping.trace_env():
     jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_kernel_fun,
                                                      kernel_avals, debug)
     if consts:
-      consts_avals = [jax_core.get_aval(c) for c in consts]
+      consts_avals = [jax_core.raise_to_shaped(jax_core.get_aval(c))
+                      for c in consts]
       if any(not isinstance(aval, state.AbstractRef) for aval in consts_avals):
         raise ValueError(
             f"The kernel function in the pallas_call {name_and_src_info} "
@@ -1808,7 +1804,8 @@ def pallas_call(
   def wrapped(*args):
     flat_args_with_paths, in_tree = tree_util.tree_flatten_with_path(args)
     in_paths, flat_args = unzip2(flat_args_with_paths)
-    flat_in_avals = tuple(jax_core.get_aval(a) for a in flat_args)
+    flat_in_avals = tuple(jax_core.raise_to_shaped(jax_core.get_aval(a))
+                          for a in flat_args)
 
     flat_out_avals = tuple(_convert_out_shape_to_aval(v)
                            for v in flat_out_shapes)
@@ -1816,11 +1813,13 @@ def pallas_call(
     kernel_fun_sig = api_util.fun_signature(kernel)
     arg_names = None
     if kernel_fun_sig:
-      kernel_debug_info = api_util.tracing_debug_info(
+      kernel_debug_info = api_util.debug_info(
           "pallas_call kernel",
-           kernel,
-           [1] * len(kernel_fun_sig.parameters), {})
-      arg_names = kernel_debug_info.arg_names
+           kernel_src_info,
+           kernel_fun_sig,
+           [1] * len(kernel_fun_sig.parameters), {}, (), ())
+      if kernel_debug_info:
+        arg_names = kernel_debug_info.arg_names
       del kernel_debug_info
     in_origins = tuple(in_path_to_input_origin(p, arg_names)
                        for p in in_paths)
@@ -1913,10 +1912,6 @@ def in_path_to_input_origin(
   if isinstance(arg_idx, tree_util.SequenceKey) and arg_idx.idx < len(
       arg_names
   ):
-    if arg_names[arg_idx.idx] is None:
-      # TODO(necula): when is this needed?
-      # Repro: pallas_test:test_with_input_output_aliasing
-      return f"args{tree_util.keystr(in_path)}"
     return arg_names[arg_idx.idx] + tree_util.keystr(tuple(rest_path))
   else:
     return f"args{tree_util.keystr(tuple(in_path))}"

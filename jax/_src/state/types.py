@@ -367,8 +367,9 @@ class AbstractRef(core.AbstractValue):
 def _map_ref(size, axis, ref_aval):
   return AbstractRef(core.mapped_aval(size, axis, ref_aval.inner_aval))
 
-def _unmap_ref(size, axis, ref_aval):
-  return AbstractRef(core.unmapped_aval(size, axis, ref_aval.inner_aval))
+def _unmap_ref(size, axis_name, axis, ref_aval):
+  return AbstractRef(core.unmapped_aval(size, axis_name, axis,
+                                        ref_aval.inner_aval))
 
 core.aval_mapping_handlers[AbstractRef] = (_map_ref, _unmap_ref)
 
@@ -413,7 +414,7 @@ _ref_type_aval_mappings: dict[
 
 def _default_value_to_ref_aval(x: Any) -> tuple[AbstractRef, Array]:
   # Default type mapping just creates an AbstractRef from the array's aval.
-  aval = core.get_aval(x)
+  aval = core.raise_to_shaped(core.get_aval(x))
   return AbstractRef(aval), x
 
 

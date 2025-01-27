@@ -13,11 +13,8 @@ List of Functions
 
    all
    flatten
-   flatten_with_path
    leaves
-   leaves_with_path
    map
-   map_with_path
    reduce
    structure
    transpose

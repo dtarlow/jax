@@ -176,7 +176,6 @@ from jax._src.numpy.lax_numpy import (
     logspace as logspace,
     mask_indices as mask_indices,
     matmul as matmul,
-    matvec as matvec,
     matrix_transpose as matrix_transpose,
     meshgrid as meshgrid,
     moveaxis as moveaxis,
@@ -259,7 +258,6 @@ from jax._src.numpy.lax_numpy import (
     vander as vander,
     vdot as vdot,
     vecdot as vecdot,
-    vecmat as vecmat,
     vsplit as vsplit,
     vstack as vstack,
     where as where,
@@ -281,7 +279,6 @@ try:
   from jax._src.numpy.lax_numpy import (
     float8_e3m4 as float8_e3m4,
     float8_e4m3 as float8_e4m3,
-    float8_e8m0fnu as float8_e8m0fnu,
   )
 except ImportError:
   pass
@@ -480,15 +477,17 @@ del register_jax_array_methods
 
 
 _deprecations = {
-  # Finalized 2024-12-13; remove after 2024-3-13
+  # Deprecated 03 Sept 2024
   "round_": (
-    "jnp.round_ was deprecated in JAX 0.4.38; use jnp.round instead.",
-    None
+    "jnp.round_ is deprecated; use jnp.round instead.",
+    round
   ),
 }
 
 import typing
-if not typing.TYPE_CHECKING:
+if typing.TYPE_CHECKING:
+  round_ = round
+else:
   from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
   __getattr__ = _deprecation_getattr(__name__, _deprecations)
   del _deprecation_getattr

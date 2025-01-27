@@ -22,7 +22,9 @@ import math
 import operator as op
 from typing import Any, TYPE_CHECKING, cast
 
+from jax._src import abstract_arrays
 from jax._src import api
+from jax._src import api_util
 from jax._src import basearray
 from jax._src import config
 from jax._src import core
@@ -31,7 +33,6 @@ from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import errors
 from jax._src import profiler
-from jax._src import util
 from jax._src import xla_bridge
 from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
@@ -39,9 +40,10 @@ from jax._src.interpreters import xla
 from jax._src.layout import AutoLayout, DeviceLocalLayout, Layout
 from jax._src.lib import xla_client as xc
 from jax._src.lib import xla_extension as xe
+from jax._src.lib import xla_extension_version
 from jax._src.sharding import Sharding
 from jax._src.sharding_impls import (
-    PmapSharding, SingleDeviceSharding,
+    PmapSharding, SingleDeviceSharding, NamedSharding,
     device_replica_id_map, hashed_index, num_addressable_indices, local_to_global_shape)  # pyformat: disable
 from jax._src.typing import ArrayLike, DLDeviceType
 from jax._src.util import safe_zip, unzip3, use_cpp_class, use_cpp_method, cache
@@ -753,8 +755,7 @@ def make_array_from_callback(
   first_value = per_device_values[0]
   expected_dtype = first_value.dtype
   expected_shape = sharding.shard_shape(shape)
-  aval = core.update_aval_with_sharding(
-      core.ShapedArray(shape, expected_dtype), sharding)
+  aval = core.ShapedArray(shape, expected_dtype)
   _validate_shape_and_dtype_for_per_device_arrays(
       per_device_values,
       expected_shape=expected_shape,
@@ -1014,32 +1015,30 @@ def make_array_from_single_device_arrays(
   """
   # All input arrays should be committed. Checking it is expensive on
   # single-controller systems.
-  aval = core.update_aval_with_sharding(
-      core.ShapedArray(shape, arrays[0].dtype, weak_type=False), sharding)
+  if any(isinstance(arr, core.Tracer) for arr in arrays):
+    raise ValueError(
+        "jax.make_array_from_single_device_arrays requires a list of concrete"
+        f" arrays as input. got types {set(map(type, arrays))}")
+  aval = core.ShapedArray(shape, arrays[0].dtype, weak_type=False)
   if dtypes.issubdtype(aval.dtype, dtypes.extended):
     return aval.dtype._rules.make_sharded_array(aval, sharding, arrays,
                                                 committed=True)
   # TODO(phawkins): ideally the cast() could be checked.
-  try:
-    return ArrayImpl(aval, sharding, cast(Sequence[ArrayImpl], arrays),
-                    committed=True)
-  except TypeError:
-    if not isinstance(arrays, Sequence):
-      raise TypeError("jax.make_array_from_single_device_arrays `arrays` "
-                      "argument must be a Sequence (list or tuple), but got "
-                      f"{type(arrays)}.")
-    if any(isinstance(arr, core.Tracer) for arr in arrays):
-      raise ValueError(
-          "jax.make_array_from_single_device_arrays requires a list of concrete"
-          f" arrays as input, but got types {set(map(type, arrays))}")
-    raise
+  return ArrayImpl(aval, sharding, cast(Sequence[ArrayImpl], arrays),
+                   committed=True)
 
+
+core.pytype_aval_mappings[ArrayImpl] = abstract_arrays.canonical_concrete_aval
+xla.pytype_aval_mappings[ArrayImpl] = op.attrgetter('aval')
 xla.canonicalize_dtype_handlers[ArrayImpl] = pxla.identity
-
 def _get_aval_array(self):
-  return core.update_aval_with_sharding(self.aval, self.sharding)
-core.pytype_aval_mappings[ArrayImpl] = _get_aval_array
-
+  if config.sharding_in_types.value and isinstance(self.sharding, NamedSharding):
+    return self.aval.update(sharding=NamedSharding(
+        self.sharding.mesh.abstract_mesh,
+        self.sharding.spec._normalized_spec(self.ndim)))
+  else:
+    return self.aval
+api_util._shaped_abstractify_handlers[ArrayImpl] = _get_aval_array
 # TODO(jakevdp) replace this with true inheritance at the C++ level.
 basearray.Array.register(ArrayImpl)
 
@@ -1096,7 +1095,7 @@ def shard_device_array(x, devices, indices, sharding):
     shards = [x] * len(devices)
   else:
     shards = x._multi_slice(start_indices, limit_indices, removed_dims)
-  aval = core.shaped_abstractify(x)
+  aval = api_util.shaped_abstractify(x)
   return pxla.batched_device_put(aval, sharding, shards, devices)
 
 
@@ -1121,7 +1120,7 @@ def shard_sharded_device_array_slow_path(x, devices, indices, sharding):
         bufs.append(buf)
         break
     else:
-      bufs.append(candidates_list[-1])
+      bufs.append(buf)
   return pxla.batched_device_put(x.aval, sharding, bufs, devices)
 
 
@@ -1133,7 +1132,6 @@ def _sharding_indices_and_eq(src_sharding, shape, dst_sharding):
 
 
 def _array_shard_arg(xs, shardings, layouts, copy_semantics):
-  util.test_event("_array_shard_arg")
   results = []
   batch_xs, batch_devs, batch_shardings, batch_indices = [], [], [], []
   batch_cs = []
@@ -1171,9 +1169,12 @@ def _array_shard_arg(xs, shardings, layouts, copy_semantics):
         results.append(
             shard_sharded_device_array_slow_path(x, devices, indices, sharding))
 
-  util.test_event("batched_copy_array")
-  copy_outs = xc.batched_copy_array_to_devices_with_sharding(
-      batch_xs, batch_devs, batch_shardings, batch_cs)
+  if xla_extension_version >= 296:
+    copy_outs = xc.batched_copy_array_to_devices_with_sharding(
+        batch_xs, batch_devs, batch_shardings, batch_cs)
+  else:
+    copy_outs = xc.batched_copy_array_to_devices_with_sharding(  # pytype: disable=missing-parameter
+        batch_xs, batch_devs, batch_shardings)
   for i, copy_out in safe_zip(batch_indices, copy_outs):
     assert results[i] is None
     results[i] = copy_out
@@ -1182,7 +1183,6 @@ pxla.shard_arg_handlers[ArrayImpl] = _array_shard_arg
 
 
 def _array_global_result_handler(global_aval, out_sharding, committed):
-  global_aval = core.update_aval_with_sharding(global_aval, out_sharding)
   if global_aval.dtype == dtypes.float0:
     return lambda _: np.zeros(global_aval.shape, dtypes.float0)
   if dtypes.issubdtype(global_aval.dtype, dtypes.extended):
@@ -1209,12 +1209,8 @@ pxla.local_result_handlers[core.ShapedArray] = _array_local_result_handler
 # Token handlers
 
 def _token_shard_arg(xs, shardings, layouts, copy_semantics):
-  results = []
-  for x, sharding, layout in safe_zip(xs, shardings, layouts):
-    x.block_until_ready()
-    x = np.array([], dtype=bool)
-    results.append(api.device_put(x, Layout(layout, sharding)))
-  return results
+  return _array_shard_arg([x._buf for x in xs], shardings, layouts,
+                          copy_semantics)
 pxla.shard_arg_handlers[core.Token] = _token_shard_arg
 
 

@@ -36,9 +36,6 @@ class ExportTest(jtu.JaxTestCase):
     super().setUp()
 
   def test_cross_platform(self):
-    # TODO(apaszke): Remove after 12 weeks have passed.
-    if not jtu.if_cloud_tpu_at_least(2024, 12, 19):
-      self.skipTest("Requires libtpu built after 2024-12-19")
     def add_vectors_kernel(x_ref, y_ref, o_ref):
       x, y = x_ref[...], y_ref[...]
       o_ref[...] = x + y
@@ -53,10 +50,6 @@ class ExportTest(jtu.JaxTestCase):
     exp = export.export(
         add_vectors,
         platforms=["tpu", "cuda"],
-        # The Pallas GPU custom call is not enabled for export by default.
-        disabled_checks=[
-            export.DisabledSafetyCheck.custom_call("__gpu$xla.gpu.triton")
-        ]
     )(a, a)
 
     if (jtu.device_under_test() == "tpu" or

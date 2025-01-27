@@ -35,7 +35,7 @@ jax_multiplatform_test(
     enable_backends = [],
     enable_configs = [
         "gpu_h100",
-        "gpu_h100x2",
+        "gpu_h100_2gpu",
     ],
     shard_count = 8,
     tags = ["multiaccelerator"],
@@ -47,16 +47,6 @@ jax_multiplatform_test(
 jax_py_test(
     name = "gpu_dialect_test",
     srcs = ["gpu_dialect_test.py"],
-    deps = [
-        "//jax",
-        "//jax:mosaic_gpu",
-        "//jax:test_util",
-    ] + py_deps("absl/testing"),
-)
-
-jax_py_test(
-    name = "gpu_layout_inference_test",
-    srcs = ["gpu_layout_inference_test.py"],
     deps = [
         "//jax",
         "//jax:mosaic_gpu",
@@ -96,19 +86,5 @@ jax_multiplatform_test(
     deps = [
         "//jax:mosaic_gpu",
         "//jax/experimental/mosaic/gpu/examples:flash_attention",
-    ] + py_deps("absl/testing"),
-)
-
-jax_multiplatform_test(
-    name = "profiler_cupti_test",
-    srcs = ["profiler_cupti_test.py"],
-    enable_backends = [],
-    enable_configs = ["gpu_h100"],
-    tags = [
-        "noasan",  # CUPTI leaks memory
-        "nomsan",
-    ],
-    deps = [
-        "//jax:mosaic_gpu",
     ] + py_deps("absl/testing"),
 )

@@ -76,7 +76,6 @@ pytype_strict_library(
         ":lowering",
         "//jax",
         "//jax:config",
-        "//jax:core",
         "//jax:mlir",
         "//jax:util",
         "//jax/_src/lib",

@@ -20,8 +20,8 @@ load("@local_config_rocm//rocm:build_defs.bzl", _if_rocm_is_configured = "if_roc
 load("@python_version_repo//:py_version.bzl", "HERMETIC_PYTHON_VERSION")
 load("@rules_cc//cc:defs.bzl", _cc_proto_library = "cc_proto_library")
 load("@rules_python//python:defs.bzl", "py_test")
+load("@tsl//tsl/platform:build_config_root.bzl", _tf_cuda_tests_tags = "tf_cuda_tests_tags", _tf_exec_properties = "tf_exec_properties")
 load("@xla//xla/tsl:tsl.bzl", _if_windows = "if_windows", _pybind_extension = "tsl_pybind_extension_opensource")
-load("@xla//xla/tsl/platform:build_config_root.bzl", _tf_cuda_tests_tags = "tf_cuda_tests_tags", _tf_exec_properties = "tf_exec_properties")
 
 # Explicitly re-exports names to avoid "unused variable" warnings from .bzl
 # lint tools.
@@ -29,7 +29,7 @@ cc_proto_library = _cc_proto_library
 cuda_library = _cuda_library
 rocm_library = _rocm_library
 pytype_test = native.py_test
-nanobind_extension = _pybind_extension
+pybind_extension = _pybind_extension
 if_cuda_is_configured = _if_cuda_is_configured
 if_rocm_is_configured = _if_rocm_is_configured
 if_windows = _if_windows
@@ -120,7 +120,7 @@ def py_library_providing_imports_info(*, name, lib_rule = native.py_library, pyt
     lib_rule(name = name, **kwargs)
 
 def py_extension(name, srcs, copts, deps, linkopts = []):
-    nanobind_extension(name, srcs = srcs, copts = copts, linkopts = linkopts, deps = deps, module_name = name)
+    pybind_extension(name, srcs = srcs, copts = copts, linkopts = linkopts, deps = deps, module_name = name)
 
 def windows_cc_shared_mlir_library(name, out, deps = [], srcs = [], exported_symbol_prefixes = []):
     """Workaround DLL building issue.
@@ -398,8 +398,6 @@ def jax_wheel(name, wheel_binary, enable_cuda = False, platform_version = ""):
     )
 
 jax_test_file_visibility = []
-
-jax_export_file_visibility = []
 
 def xla_py_proto_library(*args, **kw):  # buildifier: disable=unused-variable
     pass

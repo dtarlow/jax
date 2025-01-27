@@ -13,14 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// clang-format: off
+// pybind11 must be included before mlir/Bindings/Python/PybindAdaptors.h,
+// otherwise this code will not build on Windows.
+#include "pybind11/pybind11.h"
+// clang-format: on
+
 #include "mlir-c/IR.h"
-#include "mlir/Bindings/Python/NanobindAdaptors.h"  // IWYU pragma: keep
-#include "nanobind/nanobind.h"
+#include "mlir/Bindings/Python/PybindAdaptors.h"  // IWYU pragma: keep
 #include "jaxlib/mosaic/dialect/gpu/integrations/c/gpu_dialect.h"
 
-namespace nb = nanobind;
-
-NB_MODULE(_mosaic_gpu_ext, m) {
+PYBIND11_MODULE(_mosaic_gpu_ext, m, py::mod_gil_not_used()) {
   m.def(
       "register_dialect",
       [](MlirContext context, bool load) {
@@ -30,5 +33,5 @@ NB_MODULE(_mosaic_gpu_ext, m) {
           mlirDialectHandleLoadDialect(dialect, context);
         }
       },
-      nb::arg("context"), nb::arg("load") = true);
+      py::arg("context"), py::arg("load") = true);
 }

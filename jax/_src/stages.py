@@ -162,8 +162,7 @@ class Lowering(Protocol):
     """Compile and return a corresponding ``Executable``."""
     raise NotImplementedError
 
-  def as_text(self, dialect: str | None = None, *,
-              debug_info: bool = False) -> str:
+  def as_text(self, dialect: str | None = None) -> str:
     """A human-readable text representation of this lowering.
 
     Intended for visualization and debugging purposes. This need not be a valid
@@ -250,13 +249,15 @@ class XlaExecutable(Executable):
       else:
         raise
 
-  def cost_analysis(self) -> dict[str, float]:
+    # TODO(skyewm): this should return a single dict (I think returning a list
+    # was to support MPMD executables, which never fully landed)
+  def cost_analysis(self) -> list[dict[str, float]]:
     xla_ext_exe = self.xla_extension_executable()
 
     # TODO(b/259255524): Unify/merge the two cost_analysis calls below.
     if hasattr(xla_ext_exe, "cost_analysis"):
       try:
-        return xla_ext_exe.cost_analysis()
+        return [xla_ext_exe.cost_analysis()]
       except xla_extension.XlaRuntimeError as e:
         msg, *_ = e.args
         if not (type(msg) is str and msg.startswith("UNIMPLEMENTED")):
@@ -265,18 +266,10 @@ class XlaExecutable(Executable):
     # Try client method if executable cost_analysis method is unimplemented
     if hasattr(xla_ext_exe, "client"):
       try:
-        # TODO(b/384741132): We expect that the executable has only one
-        # HloModule. We should be able to remove this check once we update the
-        # Executable class to have only a single HloModule (see bug).
-        hlo_modules = xla_ext_exe.hlo_modules()
-        assert len(hlo_modules) == 1, (
-            f"Exectuable should have only one HloModule ({len(hlo_modules)})"
-            " were found)."
-        )
-
-        return xla_extension.hlo_module_cost_analysis(
-            xla_ext_exe.client, hlo_modules[0]
-        )
+        return [
+            xla_extension.hlo_module_cost_analysis(xla_ext_exe.client, m)
+            for m in xla_ext_exe.hlo_modules()
+        ]
       except xla_extension.XlaRuntimeError as e:
         msg, *_ = e.args
         supported = not (type(msg) is str and
@@ -291,7 +284,7 @@ class XlaExecutable(Executable):
         and hasattr(self.unsafe_call, "compiled")
         and hasattr(self.unsafe_call.compiled, "cost_analysis")
     ):
-      return self.unsafe_call.compiled.cost_analysis()
+      return [self.unsafe_call.compiled.cost_analysis()]
 
     raise NotImplementedError(
         f"cost analysis unsupported on current XLA backend: {type(xla_ext_exe)}"
@@ -337,18 +330,13 @@ class XlaLowering(Lowering):
       self, compiler_options: CompilerOptions | None = None) -> Executable:
     raise NotImplementedError("must override")
 
-  def as_text(self, dialect: str | None = None,
-              *,
-              debug_info: bool = False) -> str:
+  def as_text(self, dialect: str | None = None) -> str:
     if dialect is None:
       dialect = "stablehlo"
     if dialect == "stablehlo":
-      return mlir.module_to_string(self.stablehlo(),
-                                   enable_debug_info=debug_info)
+      return str(self.stablehlo())
     elif dialect == "hlo":
-      print_opts = xc._xla.HloPrintOptions.short_parsable()
-      print_opts.print_metadata = debug_info
-      return self.hlo().as_hlo_module().to_string(print_opts)
+      return self.hlo().as_hlo_text()
     else:
       raise ValueError(f"unknown dialect: {dialect}")
 
@@ -545,7 +533,6 @@ class Compiled(Stage):
 
   @staticmethod
   def call(*args, **kwargs):
-    util.test_event("stages_compiled_call")
     # This is because `__call__` passes in `self._params` as the first argument.
     # Instead of making the call signature `call(params, *args, **kwargs)`
     # extract it from args because `params` can be passed as a kwarg by users
@@ -677,21 +664,16 @@ class Lowered(Stage):
         no_kwargs=self._no_kwargs,
     )
 
-  def as_text(self, dialect: str | None = None, *,
-              debug_info: bool = False) -> str:
+  def as_text(self, dialect: str | None = None) -> str:
     """A human-readable text representation of this lowering.
 
     Intended for visualization and debugging purposes. This need not be a valid
-    nor reliable serialization.
-    Use `jax.export` if you want reliable and portable serialization.
+    nor reliable serialization. It is relayed directly to external callers.
 
     Args:
-      dialect: Optional string specifying a lowering dialect (e.g. "stablehlo",
-        or "hlo").
-      debug_info: Whether to include debugging information,
-        e.g., source location.
+      dialect: Optional string specifying a lowering dialect (e.g. "stablehlo")
     """
-    return self._lowering.as_text(dialect, debug_info=debug_info)
+    return self._lowering.as_text(dialect)
 
   def compiler_ir(self, dialect: str | None = None) -> Any | None:
     """An arbitrary object representation of this lowering.
@@ -699,14 +681,12 @@ class Lowered(Stage):
     Intended for debugging purposes. This is not a valid nor reliable
     serialization. The output has no guarantee of consistency across
     invocations.
-    Use `jax.export` if you want reliable and portable serialization.
 
     Returns ``None`` if unavailable, e.g. based on backend, compiler, or
     runtime.
 
     Args:
-      dialect: Optional string specifying a lowering dialect (e.g. "stablehlo",
-        or "hlo").
+      dialect: Optional string specifying a lowering dialect (e.g. "stablehlo")
     """
     try:
       return self._lowering.compiler_ir(dialect)
@@ -737,7 +717,7 @@ class Traced(Stage):
                "_args_flat", "_arg_names", "_num_consts"]
 
   def __init__(self, jaxpr: core.ClosedJaxpr, args_info, fun_name, out_tree,
-               lower_callable, abstract_mesh=None,
+               lower_callable, abstract_mesh=mesh_lib.null_mesh_context(),
                args_flat=None, arg_names=None, num_consts: int = 0):
     self.jaxpr = jaxpr
     self.args_info = args_info
@@ -767,7 +747,7 @@ class Traced(Stage):
     try:
       # TODO(yashkatariya): Maybe thread this into pjit params like resource_env
       # and set the context manager down the stack?
-      with mesh_lib.set_abstract_mesh(self._abstract_mesh):
+      with self._abstract_mesh:
         lowering = new_callable()
     except pxla.DeviceAssignmentMismatchError as e:
       fails, = e.args

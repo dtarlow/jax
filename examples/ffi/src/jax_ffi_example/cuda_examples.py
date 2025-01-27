@@ -24,14 +24,15 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
+import jax.extend as jex
 
 # Load the shared library with the FFI target definitions
 SHARED_LIBRARY = os.path.join(os.path.dirname(__file__), "lib_cuda_examples.so")
 library = ctypes.cdll.LoadLibrary(SHARED_LIBRARY)
 
-jax.ffi.register_ffi_target("foo-fwd", jax.ffi.pycapsule(library.FooFwd),
+jex.ffi.register_ffi_target("foo-fwd", jex.ffi.pycapsule(library.FooFwd),
                             platform="CUDA")
-jax.ffi.register_ffi_target("foo-bwd", jax.ffi.pycapsule(library.FooBwd),
+jex.ffi.register_ffi_target("foo-bwd", jex.ffi.pycapsule(library.FooBwd),
                             platform="CUDA")
 
 
@@ -41,7 +42,7 @@ def foo_fwd(a, b):
   assert a.dtype == b.dtype
   n = np.prod(a.shape).astype(np.uint64)
   out_type = jax.ShapeDtypeStruct(a.shape, a.dtype)
-  c, b_plus_1 = jax.ffi.ffi_call("foo-fwd", (out_type, out_type))(a, b, n=n)
+  c, b_plus_1 = jex.ffi.ffi_call("foo-fwd", (out_type, out_type))(a, b, n=n)
   return c, (a, b_plus_1)
 
 
@@ -54,7 +55,7 @@ def foo_bwd(res, c_grad):
   assert a.dtype == b_plus_1.dtype
   n = np.prod(a.shape).astype(np.uint64)
   out_type = jax.ShapeDtypeStruct(a.shape, a.dtype)
-  return jax.ffi.ffi_call("foo-bwd", (out_type, out_type))(c_grad, a, b_plus_1,
+  return jex.ffi.ffi_call("foo-bwd", (out_type, out_type))(c_grad, a, b_plus_1,
                           n=n)
 
 

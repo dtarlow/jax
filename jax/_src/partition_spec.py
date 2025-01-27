@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-class UnconstrainedSingleton:
+class _UnconstrainedPartitionSingleton:
 
   def __repr__(self):
     return "UNCONSTRAINED"
@@ -23,7 +23,7 @@ class UnconstrainedSingleton:
 # Unconstrained sentinel value for PartitionSpec, representing a dimension for
 # which the user wants XLA to assign the best partitioning.
 # TODO(yashkatariya): May rename to AUTO.
-_UNCONSTRAINED_PARTITION = UnconstrainedSingleton()
+_UNCONSTRAINED_PARTITION = _UnconstrainedPartitionSingleton()
 
 
 class PartitionSpec(tuple):

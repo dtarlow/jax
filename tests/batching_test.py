@@ -1326,7 +1326,6 @@ def list_insert(lst: list[a], idx: int, val: a) -> list[a]:
   return lst
 
 
-@jtu.thread_unsafe_test_class()  # temporary registration isn't thread-safe
 class VmappableTest(jtu.JaxTestCase):
   def test_basic(self):
     with temporarily_register_named_array_vmappable():

@@ -36,23 +36,6 @@ jax_multiplatform_test(
     srcs = ["api_test.py"],
     enable_configs = ["tpu_v3_2x2"],
     shard_count = 10,
-    deps = [
-        "//jax:experimental",
-    ],
-)
-
-jax_multiplatform_test(
-    name = "debug_info_test",
-    srcs = ["debug_info_test.py"],
-    enable_configs = ["tpu_v3_2x2"],
-    deps = [
-        "//jax:experimental",
-        "//jax:pallas",
-        "//jax:pallas_gpu",
-        "//jax:pallas_gpu_ops",
-        "//jax:pallas_tpu",
-        "//jax:pallas_tpu_ops",
-    ] + py_deps("numpy"),
 )
 
 jax_multiplatform_test(
@@ -76,6 +59,7 @@ jax_py_test(
     srcs = ["array_api_test.py"],
     deps = [
         "//jax",
+        "//jax:experimental_array_api",
         "//jax:test_util",
     ] + py_deps("absl/testing"),
 )
@@ -88,7 +72,7 @@ jax_multiplatform_test(
         "gpu",
     ],
     enable_configs = [
-        "gpu_p100x2",
+        "gpu_2gpu",
     ],
     tags = ["multiaccelerator"],
     deps = py_deps("tensorflow_core"),
@@ -155,13 +139,6 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "extend_test",
     srcs = ["extend_test.py"],
-    deps = ["//jax:extend"],
-)
-
-jax_multiplatform_test(
-    name = "ffi_test",
-    srcs = ["ffi_test.py"],
-    # TODO(dfm): Remove after removal of jex.ffi imports.
     deps = ["//jax:extend"],
 )
 
@@ -243,12 +220,12 @@ jax_multiplatform_test(
     srcs = ["memories_test.py"],
     enable_configs = [
         "cpu",
-        "gpu_p100x2",
+        "gpu_2gpu",
         "tpu_v3_2x2",
         "tpu_v4_2x2",
         "tpu_v5p_2x2",
         "tpu_v5e_4x2",
-        "gpu_p100x2_shardy",
+        "gpu_2gpu_shardy",
         "tpu_v5e_4x2_shardy",
     ],
     shard_count = {
@@ -267,10 +244,10 @@ jax_multiplatform_test(
         "gpu": ["noasan"],  # Memory leaks in NCCL, see https://github.com/NVIDIA/nccl/pull/1143
     },
     enable_configs = [
-        "gpu_p100x2_shardy",
+        "gpu_2gpu_shardy",
         "tpu_v3_2x2_shardy",
         "tpu_v3_2x2",
-        "gpu_p100x2",
+        "gpu_2gpu",
     ],
     shard_count = {
         "cpu": 5,
@@ -333,7 +310,7 @@ jax_multiplatform_test(
     srcs = ["mock_gpu_test.py"],
     enable_backends = ["gpu"],
     enable_configs = [
-        "gpu_p100x2_shardy",
+        "gpu_2gpu_shardy",
     ],
     tags = [
         "config-cuda-only",
@@ -718,7 +695,7 @@ jax_multiplatform_test(
     srcs = ["multibackend_test.py"],
     enable_configs = [
         "tpu_v3_2x2",
-        "gpu_p100x2",
+        "gpu_2gpu",
     ],
 )
 
@@ -816,18 +793,14 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "pytorch_interoperability_test",
     srcs = ["pytorch_interoperability_test.py"],
-    backend_tags = {
-        "gpu": [
-            "noasan",  # TODO(b/392599624): torch fails to build.
-        ],
-    },
     enable_backends = [
         "cpu",
         "gpu",
     ],
     tags = [
-        "nomsan",  # TODO(b/355237462): msan false-positives in torch?
         "not_build:arm",
+        # TODO(b/355237462): Re-enable once MSAN issue is addressed.
+        "nomsan",
     ],
     deps = py_deps("torch"),
 )
@@ -1175,14 +1148,6 @@ jax_py_test(
 )
 
 jax_py_test(
-    name = "warnings_util_test",
-    srcs = ["warnings_util_test.py"],
-    deps = [
-        "//jax:test_util",
-    ] + py_deps("absl/testing"),
-)
-
-jax_py_test(
     name = "xla_bridge_test",
     srcs = ["xla_bridge_test.py"],
     data = ["testdata/example_pjrt_plugin_config.json"],
@@ -1233,12 +1198,6 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "key_reuse_test",
     srcs = ["key_reuse_test.py"],
-)
-
-jax_multiplatform_test(
-    name = "roofline_test",
-    srcs = ["roofline_test.py"],
-    enable_backends = ["cpu"],
 )
 
 jax_multiplatform_test(
@@ -1299,14 +1258,15 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "debugging_primitives_test",
     srcs = ["debugging_primitives_test.py"],
+    disable_configs = [
+        "cpu_shardy",  # TODO(b/364547005): enable once pure callbacks are supported.
+    ],
     enable_configs = [
         "cpu",
         "gpu_h100",
         "tpu_v2_1x1",
         "tpu_v3_2x2",
         "tpu_v4_2x2",
-        "gpu_a100_shardy",
-        "tpu_v3_2x2_shardy",
     ],
 )
 
@@ -1316,12 +1276,13 @@ jax_multiplatform_test(
     backend_tags = {
         "gpu": ["noasan"],  # Memory leaks in NCCL, see https://github.com/NVIDIA/nccl/pull/1143
     },
+    disable_configs = [
+        "cpu_shardy",  # TODO(b/364547005): enable once pure callbacks are supported.
+    ],
     enable_configs = [
         "tpu_v2_1x1",
         "tpu_v3_2x2",
         "tpu_v4_2x2",
-        "tpu_v3_2x2_shardy",
-        "gpu_p100x2_shardy",
     ],
     tags = ["multiaccelerator"],
     deps = [
@@ -1374,6 +1335,9 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "for_loop_test",
     srcs = ["for_loop_test.py"],
+    disable_configs = [
+        "tpu_v5p_1x1",  # TODO(b/377666550): enable once XLA is fixed.
+    ],
     shard_count = {
         "cpu": 20,
         "gpu": 10,
@@ -1385,7 +1349,7 @@ jax_multiplatform_test(
     name = "shard_map_test",
     srcs = ["shard_map_test.py"],
     enable_configs = [
-        "gpu_p100x2_shardy",
+        "gpu_2gpu_shardy",
         "tpu_v3_2x2_shardy",
     ],
     shard_count = {
@@ -1423,7 +1387,6 @@ jax_multiplatform_test(
     srcs = ["colocated_python_test.py"],
     deps = [
         "//jax:experimental_colocated_python",
-        "//jax/extend:ifrt_programs",
     ],
 )
 
@@ -1587,22 +1550,11 @@ jax_multiplatform_test(
     tags = ["multiaccelerator"],
 )
 
-jax_py_test(
-    name = "custom_partitioning_sharding_rule_test",
-    srcs = ["custom_partitioning_sharding_rule_test.py"],
-    deps = [
-        "//jax",
-        "//jax:experimental",
-        "//jax:test_util",
-    ],
-)
-
 exports_files(
     [
         "api_test.py",
         "array_test.py",
         "cache_key_test.py",
-        "colocated_python_test.py",
         "compilation_cache_test.py",
         "memories_test.py",
         "pmap_test.py",

@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-import dataclasses
 import enum
 import math
 from typing import Any, Literal
@@ -29,36 +27,18 @@ from jax._src import tree_util
 from jax._src import util
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith as arith_dialect
-from jax._src.lib.mlir.dialects import llvm as llvm_dialect
 from jax._src.lib.mlir.dialects import nvvm as nvvm_dialect
 from jax._src.pallas import core as pallas_core
 from jax._src.pallas.mosaic_gpu import core as gpu_core
 from jax._src.pallas.mosaic_gpu import lowering
-from jax._src.pallas.mosaic_gpu.core import state_types
 from jax._src.state import discharge
 from jax._src.state import indexing
 from jax._src.state import primitives as state_primitives
-from jax.experimental.mosaic import gpu as mgpu
-from jax.experimental.mosaic.gpu import utils as mgpu_utils
+import jax.experimental.mosaic.gpu as mgpu
 import jax.numpy as jnp
 
 
 WARPGROUP_SIZE = 128
-
-
-_Ref = pallas_core.AbstractMemoryRef | state_types.TransformedRef
-
-
-def _check_ref(
-    aval: object, name: str, memory_space: gpu_core.GPUMemorySpace
-) -> None:
-  if not isinstance(aval, state_types.AbstractRef):
-    raise TypeError(f"{name} must be a reference, got {aval}")
-  aval_memory_space = getattr(aval, "memory_space", None) or gpu_core.GMEM
-  if aval_memory_space is not memory_space:
-    raise ValueError(
-        f"{name} must be a {memory_space.name.upper()} reference, got {aval}"
-    )
 
 
 copy_smem_to_gmem_p = jax_core.Primitive("copy_smem_to_gmem")
@@ -66,10 +46,8 @@ copy_smem_to_gmem_p.multiple_results = True
 
 
 @copy_smem_to_gmem_p.def_effectful_abstract_eval
-def _copy_smem_to_gmem_abstract_eval(src, dst, *args, **params):
-  _check_ref(src, "src", gpu_core.SMEM)
-  _check_ref(dst, "dst", gpu_core.GMEM)
-  del args, params  # Unused.
+def _copy_smem_to_gmem_abstract_eval(*avals, **params):
+  del avals, params  # Unused.
   return (), {state.ReadEffect(0), state.WriteEffect(1)}
 
 
@@ -109,11 +87,10 @@ def _copy_smem_to_gmem_lowering(
 def _extract_gmem_copy_params(transforms):
   if not transforms:
     return {}
-  for transform in transforms:
-    if not isinstance(transform, indexing.NDIndexer):
-      raise NotImplementedError(
-          "Non-indexing transforms on GMEM refs are not implemented.")
-  indexer = lowering.merge_indexers(transforms)
+  if len(transforms) > 1:
+    raise NotImplementedError("Only one level of indexing on GMEM refs supported")
+  if not isinstance(indexer := transforms[0], indexing.NDIndexer):
+    raise NotImplementedError("Only indexing on GMEM refs supported")
   return dict(
       gmem_slice=lowering._ndindexer_indices(indexer),
   )
@@ -135,7 +112,9 @@ def _extract_smem_copy_params(transforms):
 
 
 def copy_smem_to_gmem(
-    src: _Ref, dst: _Ref, predicate: jax.Array | None = None
+    src: pallas_core.AbstractMemoryRef,
+    dst: pallas_core.AbstractMemoryRef,
+    predicate: jax.Array | None = None,
 ) -> None:
   """Asynchronously copies a SMEM reference to a GMEM reference.
 
@@ -149,6 +128,10 @@ def copy_smem_to_gmem(
     :func:`jax.experimental.mosaic.gpu.wait_smem_to_gmem`
     :func:`jax.experimental.mosaic.gpu.commit_smem`
   """
+  if src.memory_space is not gpu_core.SMEM:
+    raise TypeError(f"src must be a SMEM reference, got {src.memory_space}")
+  if getattr(dst, "memory_space", gpu_core.GMEM) is not gpu_core.GMEM:
+    raise ValueError(f"dst must be a GMEM reference, got {dst.memory_space}")
   src, src_transforms = state_primitives.get_ref_and_transforms(
       src, None, "copy_smem_to_gmem", force_trailing_indexer=False,
   )
@@ -179,11 +162,8 @@ copy_gmem_to_smem_p.multiple_results = True
 
 
 @copy_gmem_to_smem_p.def_effectful_abstract_eval
-def _copy_gmem_to_smem_abstract_eval(src, dst, barrier, *args, **params):
-  del args, params  # Unused.
-  _check_ref(src, "src", gpu_core.GMEM)
-  _check_ref(dst, "dst", gpu_core.SMEM)
-  _check_ref(barrier, "barrier", gpu_core.SMEM)
+def _copy_gmem_to_smem_abstract_eval(*avals, **params):
+  del avals, params  # Unused.
   return (), {state.ReadEffect(0), state.WriteEffect(1)}
 
 
@@ -235,13 +215,21 @@ def _copy_gmem_to_smem_lowering(
   return ()
 
 
-def copy_gmem_to_smem(src: _Ref, dst: _Ref, barrier: _Ref) -> None:
+def copy_gmem_to_smem(
+    src: pallas_core.AbstractMemoryRef,
+    dst: pallas_core.AbstractMemoryRef,
+    barrier: pallas_core.AbstractMemoryRef,
+) -> None:
   """Asynchronously copies a GMEM reference to a SMEM reference.
 
   See also:
     :func:`jax.experimental.mosaic.gpu.barrier_arrive`
     :func:`jax.experimental.mosaic.gpu.barrier_wait`
   """
+  if getattr(src, "memory_space", gpu_core.GMEM) is not gpu_core.GMEM:
+    raise TypeError(f"src must be a GMEM reference, got {src.memory_space}")
+  if dst.memory_space is not gpu_core.SMEM:
+    raise ValueError(f"dst must be a SMEM reference, got {dst.memory_space}")
   src, src_transforms = state_primitives.get_ref_and_transforms(
       src, None, "copy_gmem_to_smem", force_trailing_indexer=False,
   )
@@ -301,9 +289,8 @@ barrier_arrive_p.multiple_results = True
 
 
 @barrier_arrive_p.def_effectful_abstract_eval
-def _barrier_arrive_abstract_eval(barrier, *args, **params):
-  del args, params  # Unused.
-  _check_ref(barrier, "barrier", gpu_core.SMEM)
+def _barrier_arrive_abstract_eval(*avals, **params):
+  del avals, params  # Unused.
   return (), {gpu_core._memory_effect}
 
 
@@ -339,9 +326,8 @@ barrier_wait_p.multiple_results = True
 
 
 @barrier_wait_p.def_effectful_abstract_eval
-def _barrier_wait_abstract_eval(barrier, *args, **params):
-  _check_ref(barrier, "barrier", gpu_core.SMEM)
-  del args, params  # Unused.
+def _barrier_wait_abstract_eval(*avals, **params):
+  del avals, params  # Unused.
   return (), {gpu_core._memory_effect}
 
 
@@ -413,7 +399,7 @@ def wgmma(
     a,
     b: pallas_core.TransformedRef,
 ) -> None:
-  """Performs an asynchronous warp group matmul-accumulate on the given references.
+  """Performs and asynchronous warp group matmul-accumulate on the given references.
 
   Conceptually, this is equivalent to doing ``acc[...] += a[...] @ b[...]``,
   except that the computation is performed asynchronously.
@@ -634,33 +620,10 @@ def _wgmma_accumulator_deref_lowering(ctx: lowering.LoweringRuleContext, acc):
 
 class Layout(enum.Enum):
   #: [m, n] matrix, where m % 64 == 0 == n % 8.
-  WGMMA = mgpu.WGMMAFragLayout
+  WGMMA = mgpu.WGMMA_LAYOUT
   #: [m] matrix, where m % 64 == 0.
-  WGMMA_ROW = mgpu.WGMMARowFragLayout
+  WGMMA_ROW = mgpu.WGMMA_ROW_LAYOUT
 
-  WG_SPLAT = mgpu.WGSplatFragLayout
-  WG_STRIDED = mgpu.WGStridedFragLayout
-
-  def __call__(self, *args, **kwargs) -> ParameterizedLayout:
-    return ParameterizedLayout(self, args, kwargs)
-
-
-@dataclasses.dataclass(frozen=True)
-class ParameterizedLayout:
-  layout_cls: Layout
-  args: Sequence[Any]
-  kwargs: Any
-
-
-def _get_mgpu_layout(layout: Layout | ParameterizedLayout
-                     ) -> mgpu.FragmentedLayout:
-  if isinstance(layout, Layout):
-    return layout.value()
-  elif isinstance(layout, ParameterizedLayout):
-    return layout.layout_cls.value(*layout.args,
-                                   **layout.kwargs)
-  else:
-    raise TypeError(f"Unsupported layout: {layout}")
 
 layout_cast_p = jax_core.Primitive("layout_cast")
 
@@ -674,10 +637,10 @@ def _layout_cast_abstract_eval(x, new_layout):
 @lowering.register_lowering_rule(layout_cast_p)
 def _layout_cast_lowering(ctx: lowering.LoweringRuleContext, x, *, new_layout):
   del ctx  # Unused.
-  return x.to_layout(_get_mgpu_layout(new_layout))
+  return x.to_layout(new_layout.value)
 
 
-def layout_cast(x: Any, new_layout: Layout | ParameterizedLayout):
+def layout_cast(x: Any, new_layout: Layout):
   """Casts the layout of the given array."""
   return layout_cast_p.bind(x, new_layout=new_layout)
 
@@ -729,49 +692,3 @@ def _commit_smem_lowering(ctx: lowering.LoweringRuleContext):
 def commit_smem():
   """Commits all writes to SMEM, making them visible to loads, TMA and WGMMA."""
   commit_smem_p.bind()
-
-
-broadcasted_iota_p = jax_core.Primitive("broadcasted_iota")
-
-@broadcasted_iota_p.def_abstract_eval
-def _broadcasted_iota_abstract_eval(dtype, shape, dimension, layout):
-  del layout, dimension
-  return jax_core.ShapedArray(shape, dtype)
-
-
-@lowering.register_lowering_rule(broadcasted_iota_p)
-def _broadcasted_iota_lowering(
-    ctx: lowering.LoweringRuleContext, dtype, shape, dimension, layout
-):
-  del ctx  # Unused.
-  mlir_dtype = mgpu_utils.dtype_to_ir_type(dtype)
-  if ir.FloatType.isinstance(mlir_dtype):
-    i32 = ir.IntegerType.get_signless(32)
-    cast = lambda x: arith_dialect.uitofp(
-        mlir_dtype, arith_dialect.index_cast(i32, x)
-    )
-  else:
-    cast = lambda x: arith_dialect.index_cast(mlir_dtype, x)
-  is_signed = mgpu_utils.is_signed(dtype)
-  return mgpu.FragmentedArray.splat(
-      llvm_dialect.mlir_undef(mlir_dtype),
-      shape,
-      _get_mgpu_layout(layout),
-      is_signed=is_signed,
-  ).foreach(
-      lambda _, idx: cast(idx[dimension]),
-      create_array=True,
-      is_signed=is_signed,
-  )
-
-
-def broadcasted_iota(
-    dtype: jax.typing.DTypeLike,
-    shape: Sequence[int],
-    dimension: int,
-    *,
-    layout: Layout | None = None,
-) -> jax.Array:
-  return broadcasted_iota_p.bind(
-      dtype=jnp.dtype(dtype), shape=shape, dimension=dimension, layout=layout
-  )

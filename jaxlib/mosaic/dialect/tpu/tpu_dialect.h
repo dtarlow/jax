@@ -31,7 +31,6 @@ limitations under the License.
 #include "mlir/include/mlir/Support/LogicalResult.h"
 #include "jaxlib/mosaic/dialect/tpu/layout.h"
 #include "jaxlib/mosaic/dialect/tpu/tpu_enums.h.inc"
-#include "jaxlib/mosaic/dialect/tpu/transforms/serde.h"
 #include "xla/layout.h"
 
 namespace mlir::tpu {
@@ -76,15 +75,9 @@ std::unique_ptr<OperationPass<func::FuncOp>> createInferMemRefLayoutPass(
     const TpuTilingFlags &tpu_tiling_flags = {});
 
 std::unique_ptr<OperationPass<func::FuncOp>> createCanonicalizeMosaicPass(
-    int hardware_generation = -1, bool compatibility_mode = true);
+    int hardware_generation = -1);
 
 std::unique_ptr<OperationPass<func::FuncOp>> createInferVectorLayoutPass(
-    int hardware_generation = -1,
-    std::array<int64_t, 2> target_shape = {8, 128},
-    const TpuTilingFlags &tpu_tiling_flags = {});
-
-std::unique_ptr<OperationPass<func::FuncOp>> createRelayoutInsertionPass(
-    int hardware_generation = -1,
     std::array<int64_t, 2> target_shape = {8, 128});
 
 std::unique_ptr<OperationPass<func::FuncOp>> createApplyVectorLayoutPass(

@@ -386,7 +386,7 @@ def _create_device_mesh_for_nd_torus_splitting_axes(
           )
       ):
         best_logical_axis_assignment = logical_axis_assignment
-    assignment[:, logical_axis] = best_logical_axis_assignment  # type: ignore  # numpy 2.2
+    assignment[:, logical_axis] = best_logical_axis_assignment
 
   # Read out the assignment.
   logical_mesh = _generate_logical_mesh(
@@ -597,10 +597,10 @@ def _generate_logical_mesh(
           zip(logical_indices, physical_indices, range(len(logical_indices)))
       )
   )
-  logical_mesh = np.transpose(logical_mesh, transpose_axes)  # type: ignore  # numpy 2.2
+  logical_mesh = np.transpose(logical_mesh, transpose_axes)
 
   # Reshape to add the trivial dimensions back.
-  logical_mesh = np.reshape(logical_mesh, logical_mesh_shape)  # type: ignore  # numpy 2.2
+  logical_mesh = np.reshape(logical_mesh, logical_mesh_shape)
 
   return logical_mesh
 
@@ -705,15 +705,6 @@ def _transpose_trick(
       *_TRANSPOSE_TRICKS[topology][mesh_shape_no_trivial_dims]
   )
 
-def _canonicalize_axis_sizes(axis_sizes: Sequence[int]
-                             ) -> tuple[int, ...] | None:
-  new_sizes = []
-  for s in axis_sizes:
-    try:
-      new_sizes.append(int(s))
-    except:
-      return None
-  return tuple(new_sizes)
 
 def create_device_mesh(
     mesh_shape: Sequence[int],
@@ -749,25 +740,17 @@ def create_device_mesh(
   """
   if devices is None:
     devices = xb.devices()
-
-  new_mesh_shape = _canonicalize_axis_sizes(mesh_shape)
-  if new_mesh_shape is None:
-    raise ValueError(
-        f'`mesh_shape` passed to `create_device_mesh` should be a sequence of'
-        f' ints. Got {mesh_shape}')
-  del mesh_shape
-
-  if math.prod(new_mesh_shape) != len(devices):
+  if np.prod(mesh_shape) != len(devices):
     raise ValueError(
         f'Number of devices {len(devices)} must equal the product '
-        f'of mesh_shape {new_mesh_shape}'
+        f'of mesh_shape {mesh_shape}'
     )
   last_device = devices[-1]
 
   handler = device_kind_handler_dict.get(last_device.device_kind, None)
   if handler is not None:
     result = handler(
-        new_mesh_shape, devices, contiguous_submeshes=contiguous_submeshes
+        mesh_shape, devices, contiguous_submeshes=contiguous_submeshes
     )
     if result is not None:
       return result
@@ -775,15 +758,15 @@ def create_device_mesh(
   if last_device.platform == 'tpu':
     physical_mesh = _get_physical_tpu_mesh(devices)
     if contiguous_submeshes:
-      physical_mesh = _transpose_trick(physical_mesh, new_mesh_shape)
+      physical_mesh = _transpose_trick(physical_mesh, mesh_shape)
     device_mesh, _ = _create_device_mesh_for_nd_torus(
         physical_mesh,
-        new_mesh_shape,
+        mesh_shape,
         allow_split_physical_axes=allow_split_physical_axes,
     )
     return device_mesh
   else:
-    device_mesh = np.asarray(devices).reshape(new_mesh_shape)
+    device_mesh = np.asarray(devices).reshape(mesh_shape)
     return device_mesh
 
 

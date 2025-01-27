@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import Sequence
+import contextlib
 import io
 import re
 import textwrap
@@ -28,7 +29,6 @@ import jax.numpy as jnp
 import numpy as np
 
 jax.config.parse_flags_with_absl()
-jtu.request_cpu_devices(2)
 
 def make_fake_stdin_stdout(commands: Sequence[str]) -> tuple[IO[str], io.StringIO]:
   fake_stdin = io.StringIO()
@@ -40,6 +40,14 @@ def make_fake_stdin_stdout(commands: Sequence[str]) -> tuple[IO[str], io.StringI
 
 def _format_multiline(text):
   return textwrap.dedent(text).lstrip()
+
+_exit_stack = contextlib.ExitStack()
+
+def setUpModule():
+  _exit_stack.enter_context(jtu.set_host_platform_device_count(2))
+
+def tearDownModule():
+  _exit_stack.close()
 
 foo = 2
 

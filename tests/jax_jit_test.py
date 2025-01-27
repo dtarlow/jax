@@ -19,6 +19,7 @@ from absl.testing import parameterized
 import jax
 from jax import dtypes
 from jax import numpy as jnp
+from jax._src import api_util
 from jax._src import config
 from jax._src import core
 from jax._src import lib as jaxlib
@@ -29,7 +30,7 @@ import numpy as np
 config.parse_flags_with_absl()
 
 def _cpp_device_put(value, device):
-  aval = core.shaped_abstractify(value)
+  aval = api_util.shaped_abstractify(value)
   return pxla.batched_device_put(
       aval, jax.sharding.SingleDeviceSharding(device), [value], [device])
 

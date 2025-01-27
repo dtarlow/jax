@@ -75,7 +75,7 @@ class SubprocessExecutor:
     """
     self.environment = environment or dict(os.environ)
 
-  async def run(self, cmd: str, dry_run: bool = False, detailed_timestamped_log: bool = False) -> CommandResult:
+  async def run(self, cmd: str, dry_run: bool = False) -> CommandResult:
     """
     Executes a subprocess command.
 
@@ -96,15 +96,14 @@ class SubprocessExecutor:
 
     process = await asyncio.create_subprocess_shell(
       cmd,
-      stdout=asyncio.subprocess.PIPE if detailed_timestamped_log else None,
-      stderr=asyncio.subprocess.PIPE if detailed_timestamped_log else None,
+      stdout=asyncio.subprocess.PIPE,
+      stderr=asyncio.subprocess.PIPE,
       env=self.environment,
     )
 
-    if detailed_timestamped_log:
-      await asyncio.gather(
-        _process_log_stream(process.stdout, result), _process_log_stream(process.stderr, result)
-      )
+    await asyncio.gather(
+      _process_log_stream(process.stdout, result), _process_log_stream(process.stderr, result)
+    )
 
     result.return_code = await process.wait()
     result.end_time = datetime.datetime.now()

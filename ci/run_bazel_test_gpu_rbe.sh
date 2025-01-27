@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Runs Pyest CPU tests. Requires a jaxlib wheel to be present
-# inside the $JAXCI_OUTPUT_DIR (../dist)
+# Runs Bazel GPU tests with RBE. This runs single accelerator tests with one
+# GPU apiece on RBE.
 #
 # -e: abort script if one command fails
 # -u: error if undefined variable used
@@ -26,21 +26,26 @@ set -exu -o history -o allexport
 # Source default JAXCI environment variables.
 source ci/envs/default.env
 
-# Install jaxlib wheel inside the $JAXCI_OUTPUT_DIR directory on the system.
-echo "Installing wheels locally..."
-source ./ci/utilities/install_wheels_locally.sh
+# Clone XLA at HEAD if path to local XLA is not provided
+if [[ -z "$JAXCI_XLA_GIT_DIR" ]]; then
+    export JAXCI_CLONE_MAIN_XLA=1
+fi
 
 # Set up the build environment.
 source "ci/utilities/setup_build_environment.sh"
 
-"$JAXCI_PYTHON" -c "import jax; print(jax.default_backend()); print(jax.devices()); print(len(jax.devices()))"
+# Run Bazel GPU tests with RBE (single accelerator tests with one GPU apiece).
+echo "Running RBE GPU tests..."
 
-# Set up all test environment variables
-export PY_COLORS=1
-export JAX_SKIP_SLOW_TESTS=true
-export TF_CPP_MIN_LOG_LEVEL=0
-export JAX_ENABLE_64="$JAXCI_ENABLE_X64"
-# End of test environment variable setup
-
-echo "Running CPU tests..."
-"$JAXCI_PYTHON" -m pytest -n auto --tb=short --maxfail=20 tests examples
+bazel test --config=rbe_linux_x86_64_cuda \
+      --repo_env=HERMETIC_PYTHON_VERSION="$JAXCI_HERMETIC_PYTHON_VERSION" \
+      --override_repository=xla="${JAXCI_XLA_GIT_DIR}" \
+      --test_env=XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+      --test_output=errors \
+      --test_env=TF_CPP_MIN_LOG_LEVEL=0 \
+      --test_env=JAX_EXCLUDE_TEST_TARGETS=PmapTest.testSizeOverflow \
+      --test_tag_filters=-multiaccelerator \
+      --test_env=JAX_SKIP_SLOW_TESTS=true \
+      --action_env=JAX_ENABLE_X64=0 \
+      --color=yes \
+      //tests:gpu_tests //tests:backend_independent_tests //tests/pallas:gpu_tests //tests/pallas:backend_independent_tests

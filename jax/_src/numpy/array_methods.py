@@ -41,9 +41,6 @@ from jax._src.lax import lax as lax_internal
 from jax._src.lib import xla_client as xc
 from jax._src.numpy import array_api_metadata
 from jax._src.numpy import lax_numpy
-from jax._src import mesh as mesh_lib
-from jax._src.pjit import auto_axes, PartitionSpec
-from jax._src.sharding_impls import canonicalize_sharding, NamedSharding
 from jax._src.numpy import reductions
 from jax._src.numpy import ufuncs
 from jax._src.ops import scatter
@@ -512,15 +509,12 @@ def _view(self: Array, dtype: DTypeLike | None = None, type: None = None) -> Arr
   dtypes.check_user_dtype_supported(dtype, "view")
   dtype = dtypes.canonicalize_dtype(dtype)
 
-  nbits_in = dtypes.bit_width(self.dtype)
-  nbits_out = dtypes.bit_width(dtype)
-
   if self.ndim == 0:
-    if nbits_in != nbits_out:
+    if self.dtype.itemsize != dtype.itemsize:
       raise ValueError("view() of a 0d array is only supported if the itemsize is unchanged.")
     return _view(lax.expand_dims(self, (0,)), dtype).squeeze()
 
-  if (self.shape[-1] * nbits_in) % nbits_out != 0:
+  if (self.shape[-1] * self.dtype.itemsize) % dtype.itemsize != 0:
     raise ValueError("When changing to a larger dtype, its size must be a divisor "
                      "of the total size in bytes of the last axis of the array.")
 
@@ -549,15 +543,16 @@ def _view(self: Array, dtype: DTypeLike | None = None, type: None = None) -> Arr
 
   # lax.bitcast_convert_type adds or subtracts dimensions depending on the
   # relative bitwidths of the dtypes; we account for that with reshapes.
-  if nbits_in < nbits_out:
-    factor = nbits_out // nbits_in
+  if self.dtype.itemsize < dtype.itemsize:
+    factor = dtype.itemsize // self.dtype.itemsize
     out = self.reshape(*self.shape[:-1], self.shape[-1] // factor, factor)
     return lax.bitcast_convert_type(out, dtype)
-  elif nbits_in > nbits_out:
+
+  if self.dtype.itemsize > dtype.itemsize:
     out = lax.bitcast_convert_type(self, dtype)
     return out.reshape(*out.shape[:-2], out.shape[-2] * out.shape[-1])
-  else:
-    return lax.bitcast_convert_type(self, dtype)
+
+  return lax.bitcast_convert_type(self, dtype)
 
 
 def _notimplemented_flat(self):
@@ -634,8 +629,7 @@ def _multi_slice(self: Array,
 # avoid circular imports.
 @jax.jit
 def _unstack(x: Array) -> list[Array]:
-  dims = (0,)
-  return [lax.squeeze(t, dims) for t in lax.split(x, (1,) * x.shape[0])]
+  return [lax.index_in_dim(x, i, keepdims=False) for i in range(x.shape[0])]
 
 def _chunk_iter(x, size):
   if size > x.shape[0]:
@@ -766,7 +760,7 @@ class _IndexUpdateRef:
     return f"_IndexUpdateRef({self.array!r}, {self.index!r})"
 
   def get(self, *, indices_are_sorted=False, unique_indices=False,
-          mode=None, fill_value=None, out_sharding=None):
+          mode=None, fill_value=None):
     """Equivalent to ``x[idx]``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -776,16 +770,10 @@ class _IndexUpdateRef:
 
     See :mod:`jax.ops` for details.
     """
-    take = partial(lax_numpy._rewriting_take,
-                   indices_are_sorted=indices_are_sorted,
-                   unique_indices=unique_indices, mode=mode,
-                   fill_value=fill_value)
-    if out_sharding is not None:
-      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
-      out_sharding = canonicalize_sharding(out_sharding)
-      take = auto_axes(take, axes=mesh_lib.get_abstract_mesh().axis_names,  # type: ignore
-                       out_shardings=out_sharding.spec)
-    return take(self.array, self.index)
+    return lax_numpy._rewriting_take(self.array, self.index,
+                                     indices_are_sorted=indices_are_sorted,
+                                     unique_indices=unique_indices, mode=mode,
+                                     fill_value=fill_value)
 
   def set(self, values, *, indices_are_sorted=False, unique_indices=False,
           mode=None):
@@ -818,7 +806,7 @@ class _IndexUpdateRef:
     def _scatter_apply(x, indices, y, dims, **kwargs):
       return lax.scatter_apply(x, indices, func, dims, update_shape=y.shape, **kwargs)
     return scatter._scatter_update(self.array, self.index,
-                                   lax_internal._zero(self.array),
+                                   lax_internal._zero(self.array.dtype),
                                    _scatter_apply,
                                    indices_are_sorted=indices_are_sorted,
                                    unique_indices=unique_indices, mode=mode)

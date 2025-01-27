@@ -22,6 +22,7 @@ See also the :class:`jax.experimental.pallas` module API documentation.
    :maxdepth: 2
 
    quickstart
+   design
    grid_blockspec
 
 
@@ -33,9 +34,9 @@ See also the :class:`jax.experimental.pallas` module API documentation.
 
 .. toctree::
    :caption: Design Notes
-   :maxdepth: 2
+   :maxdepth: 1
 
-   design/index
+   async_note
 
 .. toctree::
    :caption: Other

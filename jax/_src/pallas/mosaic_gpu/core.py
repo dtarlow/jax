@@ -24,7 +24,6 @@ import enum
 import itertools as it
 from typing import Any, ClassVar, Literal
 
-import jax
 from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import effects
@@ -32,7 +31,6 @@ from jax._src import tree_util
 from jax._src.pallas import core as pallas_core
 from jax._src.state import indexing
 from jax._src.state import types as state_types
-from jax._src.state import discharge as state_discharge
 import jax.experimental.mosaic.gpu as mgpu
 import jax.numpy as jnp
 from jaxlib.mlir import ir
@@ -106,6 +104,7 @@ class GPUMemorySpace(enum.Enum):
     return self.value
 
   def __call__(
+
       self,
       shape: tuple[int, ...],
       dtype: jnp.dtype,
@@ -114,24 +113,6 @@ class GPUMemorySpace(enum.Enum):
   ) -> pallas_core.MemoryRef:
     # A convenience function for constructing MemoryRef types.
     return GPUMemoryRef(shape, dtype, memory_space=self, transforms=transforms)
-
-
-def kernel(body, out_shape, compiler_params=None, **mesh_kwargs):
-  if unwrap_out := not isinstance(out_shape, (tuple, list)):
-    out_shape = (out_shape,)
-  def wrapper(*operands):
-    def stateful(operand_and_out_refs):
-      operand_refs, out_refs = operand_and_out_refs
-      def cmap_body():
-        body(*operand_refs, *out_refs)
-      pallas_core.core_map(
-          GPUMesh(**mesh_kwargs), compiler_params=compiler_params
-      )(cmap_body)
-    _, outs = state_discharge.run_state(stateful)(
-        (operands, jax.tree.map(jnp.zeros_like, out_shape))
-    )
-    return outs[0] if unwrap_out else outs
-  return wrapper
 
 
 @dataclasses.dataclass(frozen=True)
@@ -157,14 +138,6 @@ class MemoryRefTransform(pallas_core.MemoryRefTransform, abc.ABC):
   def to_gpu_transform(self) -> mgpu.MemRefTransform:
     pass
 
-  def batch(self, leading_rank: int):
-    """Returns a transform that accepts a ref with the extra `leading_rank` dims.
-
-    The returned transform should leave the leading dimensions unchanged and
-    only apply to the suffix of the shape.
-    """
-    raise NotImplementedError
-
   def __call__(self, aval: jax_core.ShapedArray) -> jax_core.ShapedArray:
     return aval.update(
         shape=self.to_gpu_transform().transform_shape(aval.shape)
@@ -180,6 +153,7 @@ class TilingTransform(MemoryRefTransform):
   shape of (M // X, N // Y, X, Y). Ex. A (256, 256) block that is tiled with a
   tiling of (64, 32) will be tiled as (4, 8, 64, 32).
   """
+
   tiling: tuple[int, ...]
 
   def undo(self, ref: pallas_core.TransformedRef) -> pallas_core.TransformedRef:
@@ -187,17 +161,14 @@ class TilingTransform(MemoryRefTransform):
         ref, transforms=(*ref.transforms, UntileRef(self.tiling))
     )
 
-  def batch(self, leading_rank: int):
-    return self
-
   def to_gpu_transform(self) -> mgpu.MemRefTransform:
     return mgpu.TileTransform(self.tiling)
 
 
-@tree_util.register_dataclass
+@tree_util.register_pytree_node_class
 @dataclasses.dataclass(frozen=True)
 class UntileRef(state_types.Transform):
-  tiling: tuple[int, ...] = dataclasses.field(metadata=dict(static=True))
+  tiling: tuple[int, ...]
 
   def transform_shape(self, shape):
     if shape is None:
@@ -232,6 +203,14 @@ class UntileRef(state_types.Transform):
   def undo_to_gpu_transform(self) -> mgpu.MemRefTransform:
     return mgpu.TileTransform(self.tiling)
 
+  def tree_flatten(self):
+    return (), (self.tiling,)
+
+  @classmethod
+  def tree_unflatten(cls, metadata, arrays):
+    assert not arrays
+    return cls(*metadata)
+
 
 def _perm_inverse(permutation: tuple[int, ...]) -> tuple[int, ...]:
   inverse = [-1] * len(permutation)
@@ -249,11 +228,6 @@ class TransposeTransform(MemoryRefTransform):
     if set(self.permutation) != set(range(len(self.permutation))):
       raise ValueError(f"Permutation {self.permutation} is not a permutation.")
 
-  def batch(self, leading_rank: int):
-    return TransposeTransform(
-        (*range(leading_rank), *(d + leading_rank for d in self.permutation))
-    )
-
   def undo(self, ref: pallas_core.TransformedRef) -> pallas_core.TransformedRef:
     return dataclasses.replace(
         ref,
@@ -267,7 +241,7 @@ class TransposeTransform(MemoryRefTransform):
     return mgpu.TransposeTransform(self.permutation)
 
 
-@tree_util.register_dataclass
+@tree_util.register_pytree_node_class
 @dataclasses.dataclass(frozen=True)
 class TransposeRef(state_types.Transform):
   permutation: tuple[int, ...]
@@ -297,6 +271,14 @@ class TransposeRef(state_types.Transform):
   def undo_to_gpu_transform(self) -> mgpu.MemRefTransform:
     return mgpu.TransposeTransform(_perm_inverse(self.permutation))
 
+  def tree_flatten(self):
+    return (), (self.permutation,)
+
+  @classmethod
+  def tree_unflatten(cls, metadata, arrays):
+    assert not arrays
+    return cls(*metadata)
+
 
 def transpose_ref(
     ref: pallas_core.TransformedRef | Any,
@@ -322,9 +304,6 @@ class SwizzleTransform(MemoryRefTransform):
           " accepted."
       )
 
-  def batch(self, leading_rank: int):
-    return self
-
   def undo(self, ref: pallas_core.TransformedRef) -> pallas_core.TransformedRef:
     return dataclasses.replace(
         ref, transforms=(*ref.transforms, UnswizzleRef(self.swizzle))
@@ -347,10 +326,10 @@ class SwizzleTransform(MemoryRefTransform):
     return aval
 
 
-@tree_util.register_dataclass
+@tree_util.register_pytree_node_class
 @dataclasses.dataclass(frozen=True)
 class UnswizzleRef(state_types.Transform):
-  swizzle: int = dataclasses.field(metadata=dict(static=True))
+  swizzle: int
 
   def untransform_index(
       self, idxs: tuple[Index, ...]
@@ -370,6 +349,14 @@ class UnswizzleRef(state_types.Transform):
     ):
       raise ValueError("Swizzled dims cannot be sliced")
     return idxs, self
+
+  def tree_flatten(self):
+    return (), (self.swizzle,)
+
+  @classmethod
+  def tree_unflatten(cls, metadata, arrays):
+    assert not arrays
+    return cls(*metadata)
 
 
 @dataclasses.dataclass
@@ -503,11 +490,12 @@ class GPUMesh:
   # Those are NOT CUDA threads. On Hopper they correspond to warpgroups.
   num_threads: int | None = None
   axis_names: tuple[str, ...] = ()
+  approx_math: bool = False
 
   def __post_init__(self):
     if len(self.axis_names) != len(self.grid) + (self.num_threads is not None):
       raise ValueError("Need as many axis names as grid dimensions + warp groups")
-    if self.num_threads is not None and self.num_threads > 2048 // 128:
+    if self.num_threads > 2048 // 128:
       raise ValueError(
           "Requested too many CUDA threads per block. Each Mosaic thread"
           " corresponds to 128 CUDA threads."
@@ -540,22 +528,12 @@ def _gpu_mesh_discharge_rule(
     *args,
     mesh,
     jaxpr,
-    compiler_params,
-    interpret,
-    debug,
-    cost_estimate,
 ):
-  if not isinstance(mesh, GPUMesh):
-    raise TypeError(f"Mesh must be a GPUMesh, got {type(mesh)}")
+  assert isinstance(mesh, GPUMesh)
   if mesh.cluster:
     raise NotImplementedError
-  if compiler_params and not isinstance(compiler_params, GPUCompilerParams):
-    raise TypeError(
-        "Compiler params must be a GPUCompilerParams, got"
-        f" {type(compiler_params)}"
-    )
-  if not compiler_params:
-    compiler_params = GPUCompilerParams()
+  if mesh.num_threads is None:
+    raise NotImplementedError
   return pallas_core.default_mesh_discharge_rule(
       in_avals,
       out_avals,
@@ -563,13 +541,8 @@ def _gpu_mesh_discharge_rule(
       jaxpr=jaxpr,
       grid=tuple(mesh.shape.items()),
       backend="mosaic_gpu",
-      compiler_params=compiler_params,
-      debug=debug,
-      interpret=interpret,
-      cost_estimate=cost_estimate,
+      compiler_params=GPUCompilerParams(approx_math=mesh.approx_math),
   )
-
-
 pallas_core._core_map_mesh_rules[GPUMesh] = _gpu_mesh_discharge_rule
 
 

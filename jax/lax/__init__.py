@@ -72,7 +72,6 @@ from jax._src.lax.lax import (
   collapse as collapse,
   complex as complex,
   complex_p as complex_p,
-  composite as composite,
   concatenate as concatenate,
   concatenate_p as concatenate_p,
   conj as conj,
@@ -204,8 +203,6 @@ from jax._src.lax.lax import (
   sort as sort,
   sort_key_val as sort_key_val,
   sort_p as sort_p,
-  split as split,
-  split_p as split_p,
   sqrt as sqrt,
   sqrt_p as sqrt_p,
   square as square,
@@ -365,8 +362,6 @@ from jax._src.lax.parallel import (
   psum_p as psum_p,
   psum_scatter as psum_scatter,
   pswapaxes as pswapaxes,
-  ragged_all_to_all as ragged_all_to_all,
-  ragged_all_to_all_p as ragged_all_to_all_p,
 )
 from jax._src.lax.other import (
   conv_general_dilated_local as conv_general_dilated_local,

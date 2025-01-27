@@ -93,7 +93,6 @@ class ExtendedDType(StrictABC):
 # TODO: remove Optional when minimum ml_dtypes version >= 0.5.0
 float8_e3m4: type[np.generic] | None = None
 float8_e4m3: type[np.generic] | None = None
-float8_e8m0fnu: type[np.generic] | None = None
 float8_e4m3b11fnuz: type[np.generic] = ml_dtypes.float8_e4m3b11fnuz
 float8_e4m3fn: type[np.generic] = ml_dtypes.float8_e4m3fn
 float8_e4m3fnuz: type[np.generic] = ml_dtypes.float8_e4m3fnuz
@@ -102,7 +101,6 @@ float8_e5m2fnuz: type[np.generic] = ml_dtypes.float8_e5m2fnuz
 
 _float8_e3m4_dtype: np.dtype | None = None
 _float8_e4m3_dtype: np.dtype | None = None
-_float8_e8m0fnu_dtype: np.dtype | None = None
 _float8_e4m3b11fnuz_dtype: np.dtype = np.dtype(float8_e4m3b11fnuz)
 _float8_e4m3fn_dtype: np.dtype = np.dtype(float8_e4m3fn)
 _float8_e4m3fnuz_dtype: np.dtype = np.dtype(float8_e4m3fnuz)
@@ -157,12 +155,6 @@ if hasattr(ml_dtypes, "float8_e3m4"):
   _custom_float_scalar_types.insert(0, float8_e3m4)  # type: ignore[arg-type]
   _custom_float_dtypes.insert(0, _float8_e3m4_dtype)
   _float8_dtypes.insert(0, _float8_e3m4_dtype)
-if hasattr(ml_dtypes, "float8_e8m0fnu"):
-  float8_e8m0fnu = ml_dtypes.float8_e8m0fnu
-  _float8_e8m0fnu_dtype = np.dtype(float8_e8m0fnu)
-  _custom_float_scalar_types.insert(0, float8_e8m0fnu)  # type: ignore[arg-type]
-  _custom_float_dtypes.insert(0, _float8_e8m0fnu_dtype)
-  _float8_dtypes.insert(0, _float8_e8m0fnu_dtype)
 
 # 2-bit integer support
 int2: type[np.generic] | None = None
@@ -212,21 +204,6 @@ _default_types: dict[str, type[Any]] = {
     'f': float_,
     'c': complex_,
 }
-
-def bit_width(dtype: DTypeLike) -> int:
-  """Number of bits per element for the dtype."""
-  # Note: we cannot use dtype.itemsize here because this is
-  # incorrect for sub-byte integer types.
-  if dtype == np.dtype(bool):
-    return 8  # physical bit layout for boolean dtype
-  elif issubdtype(dtype, np.integer):
-    return iinfo(dtype).bits
-  elif issubdtype(dtype, np.floating):
-    return finfo(dtype).bits
-  elif issubdtype(dtype, np.complexfloating):
-    return 2 * finfo(dtype).bits
-  else:
-    raise ValueError(f"unexpected input: {dtype=}")
 
 # Trivial vectorspace datatype needed for tangent values of int/bool primals
 float0: np.dtype = np.dtype([('float0', np.void, 0)])
@@ -442,7 +419,7 @@ def _issubdtype_cached(a: type | np.dtype | ExtendedDType,
     return b_sctype in {a_sctype, np.unsignedinteger, np.integer, np.number, np.generic}
 
   # Otherwise, fall back to numpy.issubdtype
-  return bool(np.issubdtype(a_sctype, b_sctype))
+  return np.issubdtype(a_sctype, b_sctype)
 
 can_cast = np.can_cast
 

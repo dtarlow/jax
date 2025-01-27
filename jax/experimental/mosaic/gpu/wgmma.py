@@ -23,16 +23,15 @@ from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import llvm
 from jaxlib.mlir.dialects import vector
-from jaxlib.mlir.dialects import nvvm
 import numpy as np
 
+import jax.experimental.mosaic.gpu as mgpu
 from . import utils
-from . import fragmented_array as fa
 
 # mypy: ignore-errors
 
-c = utils.c
-bytewidth = utils.bytewidth
+c = mgpu.c
+bytewidth = mgpu.bytewidth
 
 
 @jax.tree_util.register_pytree_node_class
@@ -44,10 +43,10 @@ class WGMMAAccumulator:
   as a WGMMA accumulator. In particular, when created from a
   FragmentedArray, the necessary synchronization is inserted at construction.
   """
-  value: fa.FragmentedArray
+  value: mgpu.FragmentedArray
 
-  def __init__(self, *, _value: fa.FragmentedArray, _sync: bool = True):
-    if _value.layout != fa.WGMMA_LAYOUT:
+  def __init__(self, *, _value: mgpu.FragmentedArray, _sync: bool = True):
+    if _value.layout != mgpu.WGMMA_LAYOUT:
       raise ValueError("Only WGMMA layouts supported in WGMMAAccumulator")
     self.value = _value
     if _sync:
@@ -64,8 +63,8 @@ class WGMMAAccumulator:
       dtype = f32
     zero = arith.constant(dtype, ir.FloatAttr.get(dtype, 0.0))
     return cls(
-        _value=fa.FragmentedArray.splat(
-            zero, (m, n), fa.WGMMA_LAYOUT, is_signed=is_signed
+        _value=mgpu.FragmentedArray.splat(
+            zero, (m, n), mgpu.WGMMA_LAYOUT, is_signed=is_signed
         )
     )
 
@@ -171,11 +170,11 @@ def wgmma_m64(
   supports_transpose = bytewidth(element_type) == 2
   if not supports_transpose and (a_transpose or b_transpose):
     raise ValueError("Only f16 WGMMA supports transposes")
-  if a_in_regs := isinstance(a, fa.FragmentedArray):
+  if a_in_regs := isinstance(a, mgpu.FragmentedArray):
     if a.mlir_dtype != ir.F16Type.get() and a.mlir_dtype != ir.BF16Type.get():
       raise ValueError(f"Unsupported A register array dtype: {a.mlir_dtype}")
     # Column count must be equal to swizzle // bytewidth.
-    if a.layout != fa.WGMMA_LAYOUT or a.shape != (64, swizzle // 2):
+    if a.layout != mgpu.WGMMA_LAYOUT or a.shape != (64, swizzle // 2):
       raise ValueError("Unsupported A register array layout")
     if a_k_stride is not None or a_transpose is not None:
       raise ValueError("Unsupported WGMMA features with A in registers")
@@ -310,7 +309,7 @@ def wgmma(
     a_order: WGMMALayout | None = None,
     b_order: WGMMALayout = WGMMALayout.ROW_MAJOR,
 ):
-  if a_in_regs := isinstance(a, fa.FragmentedArray):
+  if a_in_regs := isinstance(a, mgpu.FragmentedArray):
     a_element_type = a.mlir_dtype
     a_shape = a.shape
   else:
@@ -434,25 +433,70 @@ def wgmma(
           new_acc_regs[mi : mi + 1], a_mk, b_k, **wgmma_params
       )
   return WGMMAAccumulator(
-      _value=fa.FragmentedArray(
+      _value=mgpu.FragmentedArray(
           _registers=new_acc_regs,
-          _layout=fa.WGMMA_LAYOUT,
+          _layout=mgpu.WGMMA_LAYOUT,
           _is_signed=acc.value.is_signed,
       ),
       _sync=False,
   )
 
 
-def wgmma_fence(array: fa.FragmentedArray):
+def wgmma_fence(array: mgpu.FragmentedArray):
   """Fences the array construction from WGMMA instructions.
 
-  LLVM treats in-register computation as pure and can move it after the fence,
-  which is explicitly disallowed by the PTX programming model. For that reason,
-  we insert an LLVM optimization barrier before the fence.
+  This is a little workaround to force LLVM to initialize the PTX registers
+  before the wgmma.fence.sync.aligned instruction. Otherwise, LLVM treats
+  in-register computation as pure and can move it after the fence, which is
+  explicitly disallowed by the PTX programming model.
   """
-  array = fa.optimization_barrier(array)
-  nvvm.wgmma_fence_aligned()
-  return array
+  i32 = ir.IntegerType.get_signless(32)
+  index = ir.IndexType.get()
+  dtype = array.mlir_dtype
+  src_vec_ty = ir.VectorType(array.registers.flat[0].type)
+  assert src_vec_ty.shape == [2]
+
+  if dtype == ir.F32Type.get():
+    regs = [  # pylint: disable=g-complex-comprehension
+        vector.extractelement(reg, position=c(pos, index))
+        for reg in array.registers.flat
+        for pos in range(2)
+    ]
+    reg_dtype = dtype
+    reg_constraints_list = ["=f"] * len(regs) + ["f"] * len(regs)
+    ptx_lines = [f"mov.f32 ${i}, ${len(regs)+i}" for i in range(len(regs))]
+  elif dtype == ir.F16Type.get() or dtype == ir.BF16Type.get():
+    regs = [_as_i32_reg(reg) for reg in array.registers.flat]
+    reg_dtype = i32
+    reg_constraints_list = ["=r"] * len(regs) + ["r"] * len(regs)
+    ptx_lines = [f"mov.b32 ${i}, ${len(regs)+i}" for i in range(len(regs))]
+  else:
+    raise NotImplementedError(dtype)
+  reg_constraints = ",".join(reg_constraints_list)
+  # Copy over the registers. ptxas should be able to remove the moves.
+  ptx_lines.append("wgmma.fence.sync.aligned")
+  ptx = ";\n".join(ptx_lines) + ";\n"
+  dtype_str = str(reg_dtype)
+  struct_ty = ir.Type.parse(
+      f"!llvm.struct<({','.join(dtype_str for _ in regs)})>"
+  )
+  acc_struct = llvm.inline_asm(
+      struct_ty, regs, ptx, reg_constraints,
+      asm_dialect=0, has_side_effects=True,
+  )
+  regs = [
+      llvm.extractvalue(reg_dtype, acc_struct, [i]) for i in range(len(regs))
+  ]
+  if dtype == ir.F32Type.get():
+    registers = _as_fragmented_reg_ndarray(
+          regs, array.mlir_dtype, array.registers.shape
+    )
+  elif dtype == ir.F16Type.get() or dtype == ir.BF16Type.get():
+    regs = [_unpack_i32(src_vec_ty, r) for r in regs]
+    registers = np.asarray(regs, dtype=object).reshape(array.registers.shape)
+  else:
+    raise NotImplementedError(dtype)
+  return mgpu.FragmentedArray(_registers=registers, _layout=array.layout, _is_signed=array.is_signed)
 
 
 def _as_fragmented_reg_ndarray(flat_regs, dtype: ir.Type, shape: tuple[int, ...]):

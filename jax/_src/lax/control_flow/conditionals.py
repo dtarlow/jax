@@ -25,7 +25,6 @@ from typing import Any, TypeVar
 
 from jax.tree_util import tree_flatten, tree_unflatten
 from jax._src import ad_util
-from jax._src import api_util
 from jax._src import config
 from jax._src import core
 from jax._src import dispatch
@@ -50,6 +49,7 @@ from jax._src.lib.mlir.dialects import hlo
 import numpy as np
 
 from jax._src.lax.control_flow.common import (
+    _abstractify,
     _avals_short,
     _check_tree_and_avals,
     _initial_style_jaxprs_with_common_consts,
@@ -87,7 +87,6 @@ def switch(index, branches: Sequence[Callable], *operands,
   Args:
     index: Integer scalar type, indicating which branch function to apply.
     branches: Sequence of functions (A -> B) to be applied based on ``index``.
-      All branches must return the same output structure.
     operands: Operands (A) input to whichever branch is applied.
 
   Returns:
@@ -134,22 +133,14 @@ def switch(index, branches: Sequence[Callable], *operands,
   if (config.disable_jit.value and core.is_concrete(index)):
     return branches[int(index)](*operands)
 
-  dbgs = [api_util.tracing_debug_info("switch", branch, operands, {})
-          for branch in branches]
   ops, ops_tree = tree_flatten(operands)
-  ops_avals = tuple(map(core.get_aval, ops))
-
-  if config.mutable_array_checks.value:
-    api_util._check_no_aliased_ref_args(dbgs[0], ops_avals, ops)
+  ops_avals = tuple(map(_abstractify, ops))
 
   jaxprs, consts, out_trees = _initial_style_jaxprs_with_common_consts(
-      branches, ops_tree, ops_avals, dbgs)
-  if config.mutable_array_checks.value:
-    api_util._check_no_aliased_closed_over_refs(dbgs[0], (*jaxprs[0].consts, *consts), ops)
+      branches, ops_tree, ops_avals, primitive_name='switch')
   for i, (out_tree, jaxpr) in enumerate(zip(out_trees[1:], jaxprs[1:])):
-    _check_tree_and_avals("branch 0 output",
+    _check_tree_and_avals(f"branch 0 and {i + 1} outputs",
                           out_trees[0], jaxprs[0].out_avals,
-                          f"branch {i + 1} output",
                           out_tree, jaxpr.out_avals)
   joined_effects = core.join_effects(*(jaxpr.effects for jaxpr in jaxprs))
   disallowed_effects = effects.control_flow_allowed_effects.filter_not_in(joined_effects)
@@ -235,27 +226,21 @@ def _cond(pred, true_fun: Callable, false_fun: Callable, *operands,
       return false_fun(*operands)
 
   ops, ops_tree = tree_flatten(operands)
-  ops_avals = tuple(map(core.get_aval, ops))
+  ops_avals = tuple(map(_abstractify, ops))
 
-  dbg_true_fun = api_util.tracing_debug_info("cond", true_fun, operands, {})
-  if config.mutable_array_checks.value:
-    api_util._check_no_aliased_ref_args(dbg_true_fun, ops_avals, ops)
-  dbg_false_fun = api_util.tracing_debug_info("cond", false_fun, operands, {})
   jaxprs, consts, out_trees = _initial_style_jaxprs_with_common_consts(
-      (true_fun, false_fun), ops_tree, ops_avals,
-      [dbg_true_fun, dbg_false_fun])
+      (true_fun, false_fun), ops_tree, ops_avals, 'cond')
+  if any(isinstance(op_aval, AbstractRef) for op_aval in ops_avals):
+    raise ValueError("Cannot pass `Ref`s into `cond`.")
   true_jaxpr, false_jaxpr = jaxprs
-  if config.mutable_array_checks.value:
-    api_util._check_no_aliased_closed_over_refs(dbg_true_fun, (*true_jaxpr.consts, *consts), ops)
 
   out_tree, false_out_tree = out_trees
   if any(isinstance(out_aval, AbstractRef) for out_aval in
          true_jaxpr.out_avals + false_jaxpr.out_avals):
     raise ValueError("Cannot return `Ref`s from `cond`.")
 
-  _check_tree_and_avals("true_fun output",
+  _check_tree_and_avals("true_fun and false_fun output",
                         out_tree, true_jaxpr.out_avals,
-                        "false_fun output",
                         false_out_tree, false_jaxpr.out_avals)
   # prune passhtrough outputs
   true_fwds = pe._jaxpr_forwarding(true_jaxpr.jaxpr)
@@ -527,7 +512,7 @@ def _cond_partial_eval_custom(saveable, unks_in, inst_in, eqn):
   # jaxpr for each branch.
   branches_known_ : list[core.ClosedJaxpr] = []
   branches_staged_: list[core.ClosedJaxpr] = []
-  branch_res_avals: list[list[core.AbstractValue]] = []
+  branch_res_avals: list[core.AbstractValue] = []
   for jaxpr in branches:
     jaxpr_known, jaxpr_staged, _, inst_out, num_res = \
         pe.partial_eval_jaxpr_custom(
@@ -794,7 +779,7 @@ cond_p.multiple_results = True
 cond_p.def_impl(partial(dispatch.apply_primitive, cond_p))
 cond_p.def_effectful_abstract_eval(_cond_abstract_eval)
 ad.primitive_jvps[cond_p] = _cond_jvp
-ad.primitive_transposes[cond_p] = _cond_transpose
+ad.reducing_transposes[cond_p] = _cond_transpose
 pe.custom_partial_eval_rules[cond_p] = _cond_partial_eval
 batching.fancy_primitive_batchers[cond_p] = _cond_batching_rule
 xla.register_initial_style_primitive(cond_p)
@@ -949,7 +934,6 @@ def platform_dependent(*args: Any,
   platform_index = platform_index_p.bind(
     platforms=tuple(tuple(ps) for ps in platforms_lists),
     has_default=(default is not None))
-
   if default is not None:
     branches = branches + (default,)
   # Use a switch, to get the proper transformation rules for free. Since
@@ -962,8 +946,6 @@ def platform_dependent(*args: Any,
   # recognized on the compilation platform. Detect eager mode and keep only the
   # needed branch.
   try:
-    # Note/TODO(mvoz): This actually rarely seems to concretize - we could look into
-    # core.ensure_compile_time_eval to get better single-branch selection.
     platform_index_concrete = core.concrete_or_error(operator.index, platform_index)
   except core.ConcretizationTypeError:
     return switch(platform_index, branches, *args)
